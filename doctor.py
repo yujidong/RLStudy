@@ -19,7 +19,9 @@ import sys
 import time
 from pathlib import Path
 
-# Windows 控制台默认编码可能是 GBK，统一成 UTF-8 输出中文
+# Windows 控制台默认编码可能是 GBK：先切 UTF-8 代码页，再统一输出编码
+if os.name == "nt":
+    os.system("chcp 65001 >nul")
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
