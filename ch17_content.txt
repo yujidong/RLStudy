@@ -1,0 +1,1521 @@
+###%% MD
+# 第 17 章：Self-Play + Constitutional AI / RLAIF —— 减少 RLHF 对人类数据的依赖
+
+> **Ch15 §15.6.3** 给出了 7 个开放研究方向，本章合并展开其中第 2、3 条：
+>
+> > **方向 2**：self-play vs human data（AlphaZero 在棋类成功，LLM 能复制吗？）
+> > **方向 3**：constitutional AI / RLAIF（用大模型当"人类"打分）
+>
+> 本章的核心问题：
+>
+> > **RLHF 需要大量人类偏好标注（贵、慢、有偏）。能不能让 AI 自己生成数据训自己？**
+>
+> 两条互补的路径：
+>
+> - **Self-Play**（AlphaZero / SPIN / Self-Rewarding LM）：agent 自己生成数据训自己
+> - **Constitutional AI / RLAIF**（Bai 2022 / Lee 2023）：用一个 LLM 当"裁判"替代人类打分
+
+**本章是 Phase 4 第二章。** Ch16 展开了 PRM（开放方向 5）；本章合并展开开放方向 2、3
+（都是"减少人类数据依赖"——所以放在一起讲最自然）。
+
+## 学习目标
+
+1. **理解 RLHF 的标注 bottleneck**：人类偏好贵、慢、有偏、难 scale
+2. **掌握 Self-Play 的本质**：agent vs agent（AlphaZero 范式）
+3. **写出 SPIN 的目标函数**：分类器区分 real vs fake，类似 GAN
+4. **理解 Constitutional AI / RLAIF**：用 AI judge 替代人类 reward
+5. **实现 AIJudge**：在 TinyGPT 上用同一个 backbone 加 judge head
+6. **跑通 RLAIF pipeline**：AI judge → 偏好对 → RM → GRPO
+7. **对比 Ch11 RLHF 和本章 RLAIF**：人类标注 vs AI judge 的 trade-off
+
+## 承接的 Ch10-Ch16 工作
+
+| 模块 | 出处 | 本章用法 |
+|---|---|---|
+| **TinyGPT** | Ch10 §10.4 | actor + judge backbone |
+| **RewardModel** | Ch11 §11.4 | RLAIF 训出的 RM（数据换成 AI 偏好对） |
+| **GRPOTrainer** | Ch13 §13.5 | **直接复用**——把 reward_model 换成 AIJudge 即可 |
+| **PRM** | Ch16 §16.2 | 对比对象——PRM 也是 "AI judge" 的一种特例 |
+| **Ch15 §15.6.3** | 开放方向 2, 3 | **本章主题** |
+
+## 术语速查
+
+| 术语 | 含义 | 首次出现 |
+|---|---|---|
+| **Self-Play** | agent 自己生成数据训自己（如 AlphaZero 自己和自己下棋） | §17.1 |
+| **Constitutional AI (CAI)** | 给 AI 一组原则（"宪法"），让它按原则自评 | §17.4 |
+| **RLAIF** | RL from AI Feedback（把 RLHF 的 reward 换成 AI judge） | §17.4 |
+| **SPIN** | Self-Play fIne-tuNing（Singh 2023，类似 GAN 的 self-play） | §17.3 |
+| **Self-Rewarding LM** | 让 LLM 自己给自己打分（Yuan 2024） | §17.3 |
+| **AIJudge** | 用 LLM 给 response 打分的"裁判"模块 | §17.5 |
+| **constitution** | 一组原则文本（helpful / harmless / honest 等） | §17.4 |
+
+## 本章路线图（7 节）
+
+| 节 | 主题 | 关键产出 |
+|---|---|---|
+| 17.1 | **减少人类数据依赖** | RLHF bottleneck + 两条路径 |
+| 17.2 | **Self-Play 经典：AlphaZero** | MCTS + self-play 循环，为什么棋类可以 |
+| 17.3 | **LLM Self-Play** | SPIN、Self-Rewarding LM |
+| 17.4 | **Constitutional AI / RLAIF**（核心） | constitution、AI judge、CAI pipeline |
+| 17.5 | **实现：在 TinyGPT 上做简化 RLAIF** | AIJudge + AI 偏好对 + GRPO |
+| 17.6 | **Self-Play vs RLAIF 对比** | 数据来源、reward 信号、适用场景 |
+| 17.7 | **小结 + Ch18 预告** | Offline RL 预告 |
+
+## 参考文献
+
+- **Silver et al. 2017**, *Mastering the game of Go without human knowledge*（AlphaZero）
+- **Singh et al. 2023**, *Beyond Human Data: Scaling Self-Trainer Improvement* (SPIN)
+- **Yuan et al. 2024**, *Self-Rewarding Language Models*（ICML 2024）
+- **Bai et al. 2022**, *Constitutional AI: Harmlessness from AI Feedback*（Anthropic）
+- **Lee et al. 2023**, *RLAIF: Scaling Reinforcement Learning from Human Feedback with AI Feedback*（Google）
+- **Zheng et al. 2023**, *Judging LLM-as-a-Judge with MT-Bench and Chatbot Arena*
+
+###%% CODE
+# 常规设置：找项目根、载入库
+import sys, pathlib, time, math, random, copy
+ROOT = pathlib.Path.cwd()
+while not (ROOT / 'rlenvs').exists() and ROOT.parent != ROOT:
+    ROOT = ROOT.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+import numpy as np
+import matplotlib.pyplot as plt
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+# Ch10/Ch11 基础设施
+from rlenvs import (
+    CharTokenizer, TinyGPT, build_tiny_gpt,
+    generate, make_lm_batch, sft_loss,
+)
+# Ch11 reward model (人类标注 RM，对照组)
+from utils.reward_model import (
+    RewardModel, bradley_terry_loss,
+    generate_preference_data, make_preference_batch, pad_to_length,
+    reward_accuracy, predict_rewards, true_reward,
+)
+# Ch13 GRPO
+from utils.grpo import GRPOConfig, GRPOTrainer, compute_group_advantages
+# 本章新基础设施
+from utils import set_seed
+from utils.torch_utils import get_device, count_parameters
+from utils.self_play import (
+    AIJudge, Constitution,
+    generate_ai_preferences,
+    spin_objective, spin_iteration,
+    self_reward_score,
+)
+
+set_seed(42)
+torch.manual_seed(42); np.random.seed(42); random.seed(42)
+
+DEVICE = "cpu"
+print(f"PyTorch: {torch.__version__}, device = {DEVICE}")
+print()
+print("本章新基础设施: utils/self_play.py")
+print("  - Constitution                  (一组 constitutional principles)")
+print("  - AIJudge                       (用 LLM 给 response 打分)")
+print("  - generate_ai_preferences       (用 AI judge 生成偏好对)")
+print("  - spin_objective                (SPIN 分类器目标)")
+print("  - spin_iteration                (一轮 SPIN: 生成 fake + 训分类器)")
+print("  - self_reward_score             (Self-Rewarding LM)")
+print("  - tests/test_self_play.py: 17 个冒烟测试")
+
+###%% MD
+## 17.1 减少人类数据依赖
+
+### 17.1.1 RLHF 的标注 bottleneck
+
+回忆 Ch11-13 的 RLHF pipeline：
+
+```
+SFT model → [人类标注偏好对] → Reward Model → [RL: PPO/GRPO] → 对齐的 model
+                ^^^^^^^^^^^^
+                bottleneck
+```
+
+**人类偏好标注有四个痛点**：
+
+| 痛点 | 具体表现 | 量化 |
+|---|---|---|
+| **贵** | 每条偏好对要请专家标注，成本高 | ~$20 / 条（InstructGPT 报告） |
+| **慢** | 标注员需要培训、思考、复核 | ~30 条 / 人 / 天 |
+| **有偏** | 标注者偏好 ≠ 真实用户偏好 | 标注一致性 ~70% |
+| **难 scale** | 训 100B 模型需要百万级偏好对 | ~$20M / 100k 偏好对 |
+
+**结论**：人类标注是 RLHF 的 **scaling bottleneck**。模型越大、对齐越严格，
+需要的人类数据越多——成本指数增长。
+
+### 17.1.2 两条减少人类依赖的路径
+
+本章合并展开两条互补的路径：
+
+#### 路径 1：**Self-Play**（agent 自己生成数据训自己）
+
+经典案例：**AlphaZero**（Silver et al. 2017）
+
+- 完全不依赖人类棋谱——AlphaGo Zero 从零开始自己和自己下棋
+- 用 MCTS + 神经网络，通过 self-play 不停变强
+- 在围棋、国际象棋、日本将棋上都超越了人类
+
+LLM 能复制这个成功吗？这是 §17.2-17.3 的核心问题。
+
+#### 路径 2：**Constitutional AI / RLAIF**（用 AI 替代人类做评判）
+
+经典案例：**Anthropic Claude**（Bai et al. 2022）
+
+- 用一个 LLM 当"裁判"，替代人类给 response 打分
+- 给裁判一组原则（"宪法"），让它按原则评分
+- 训出的 RM 与人类标注训出的 RM **效果相当**（Lee 2023 实证）
+
+数学上：
+
+$$
+\underbrace{r_{human}(x, y)}_{\text{Ch11: 人类标注}} \quad \to \quad
+\underbrace{r_{AI}(x, y; P_{judge})}_{\text{Ch17: AI judge}}
+$$
+
+RLAIF pipeline 就是 RLHF 把 reward signal 从人类换成 AI judge——其他不变。
+
+### 17.1.3 本章路线
+
+| 章节 | 内容 | 关键产出 |
+|---|---|---|
+| §17.2 | AlphaZero self-play 范式 | 为什么棋类可以、LLM 难在哪 |
+| §17.3 | LLM self-play: SPIN + Self-Rewarding LM | GAN 式 self-play + LLM 自评 |
+| §17.4 | **Constitutional AI / RLAIF**（核心） | constitution + AI judge |
+| §17.5 | 实现：TinyGPT 上的 RLAIF | AIJudge → 偏好对 → RM → GRPO |
+| §17.6 | Self-Play vs RLAIF 对比 | 数据来源 / reward 信号 / 适用场景 |
+
+###%% MD
+## 17.2 Self-Play 经典：AlphaZero
+
+### 17.2.1 AlphaZero 的 self-play 循环
+
+**AlphaZero**（Silver et al. 2017）的 self-play 循环是这个范式的奠基工作：
+
+```
+        ┌─────────────────────────────────────┐
+        │                                     │
+        ▼                                     │
+   ┌─────────┐    self-play     ┌──────────┐  │
+   │ policy  │ ──────────────►  │ game     │  │
+   │ network │                  │ records  │  │
+   │ + value │ ◄──────────────  │ (win/lose)│  │
+   └─────────┘    MCTS search   └──────────┘  │
+        │                                     │
+        │   train policy/value on             │
+        │   (state, MCTS_dist, outcome)       │
+        └─────────────────────────────────────┘
+```
+
+**循环步骤**：
+
+1. **Self-play**：当前 policy $\pi_\theta$ 自己和自己下一局棋
+   - 每一步用 **MCTS**（Monte Carlo Tree Search）搜索 + policy network 引导
+   - 走到最后得到 outcome（胜 = +1，负 = -1，平 = 0）
+2. **数据收集**：记录每一步的 (state $s_t$, MCTS search distribution $\pi_t$, final outcome $z$)
+3. **训练**：
+   - **Policy loss**：让 $\pi_\theta$ 模仿 MCTS 分布（cross-entropy）
+   - **Value loss**：让 $V_\phi(s_t)$ 预测 outcome（MSE）
+4. **回到 1**，用更强的 policy 再下一局——如此循环
+
+### 17.2.2 为什么棋类可以 self-play
+
+棋类（围棋、象棋）的 self-play 能 work 的关键原因：
+
+| 条件 | 围棋 | 为什么重要 |
+|---|---|---|
+| **规则清晰** | 完全确定 | 任何状态都能判断合法动作 |
+| **胜负明确** | 黑/白谁赢一目了然 | **天然的 reward signal** |
+| **完美信息** | 双方都能看到完整棋盘 | 不需要建模隐藏信息 |
+| **可模拟** | 任何局面都能 fast forward | MCTS 能搜几百万节点 |
+
+**核心**：棋类有**天然的 reward**（胜负）——self-play 不需要任何外部评判。
+
+### 17.2.3 为什么 LLM 难 self-play
+
+LLM 场景**完全没有这些条件**：
+
+| 条件 | LLM 对齐 | 问题 |
+|---|---|---|
+| **规则清晰** | ❌ "什么是好的回复"是主观的 | 没有规则 |
+| **胜负明确** | ❌ 一个 response 没有"胜负" | **没有天然的 reward** |
+| **完美信息** | ❌ 用户的真实意图不可见 | 标注者要猜 |
+| **可模拟** | ✅（generate 可以批量跑） | 唯一满足的条件 |
+
+**LLM self-play 的核心难题**：**没有"胜负"的明确信号**。
+
+这导致两个 LLM 对话（"debate" / "talk to each other"）不知道哪边"赢"——
+reward signal 还是要外部提供（人类或 AI judge）。
+
+### 17.2.4 可视化：AlphaZero self-play 循环 vs LLM self-play
+
+###%% CODE
+# 17.2.4 AlphaZero self-play 循环 vs LLM self-play 对比图
+fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+# AlphaZero self-play 循环（左）
+ax = axes[0]
+ax.set_xlim(0, 10); ax.set_ylim(0, 10)
+ax.set_aspect('equal')
+from matplotlib.patches import FancyBboxPatch, FancyArrowPatch
+ax.text(5, 8, 'Policy\nNetwork', ha='center', va='center',
+        fontsize=10, fontweight='bold', color='#1f77b4')
+ax.text(2, 4, 'MCTS\nSearch', ha='center', va='center',
+        fontsize=10, fontweight='bold', color='#ff7f0e')
+ax.text(8, 4, 'Self-Play\nRecords\n(win/lose)', ha='center', va='center',
+        fontsize=10, fontweight='bold', color='#2ca02c')
+ax.text(5, 1, 'Value\nNetwork', ha='center', va='center',
+        fontsize=10, fontweight='bold', color='#d62728')
+arrow_kw = dict(arrowstyle='->', linewidth=2, color='black', alpha=0.6,
+                connectionstyle='arc3,rad=0.2')
+ax.annotate('', xy=(2, 7.3), xytext=(4, 7.5), arrowprops=arrow_kw)
+ax.annotate('', xy=(7, 4), xytext=(3.2, 4), arrowprops=arrow_kw)
+ax.annotate('', xy=(5, 1.7), xytext=(8, 3.3), arrowprops=arrow_kw)
+ax.annotate('', xy=(4, 7.5), xytext=(5, 1.7), arrowprops=arrow_kw)
+ax.set_title('AlphaZero Self-Play\n(天然 reward: 胜负)', fontsize=12, fontweight='bold')
+ax.axis('off')
+
+# LLM self-play（右）
+ax = axes[1]
+ax.set_xlim(0, 10); ax.set_ylim(0, 10)
+ax.set_aspect('equal')
+ax.text(2, 8, 'LLM A\n(generate\nresponse)', ha='center', va='center',
+        fontsize=10, fontweight='bold', color='#1f77b4')
+ax.text(8, 8, 'LLM B\n(generate\nresponse)', ha='center', va='center',
+        fontsize=10, fontweight='bold', color='#ff7f0e')
+ax.text(5, 5, 'Judge???\n(no clear winner)', ha='center', va='center',
+        fontsize=10, fontweight='bold', color='#d62728')
+ax.text(5, 1.5, 'Preference\nPairs', ha='center', va='center',
+        fontsize=10, fontweight='bold', color='#2ca02c')
+arrow_kw2 = dict(arrowstyle='->', linewidth=2, color='black', alpha=0.6)
+ax.annotate('', xy=(5, 5.8), xytext=(2.5, 7.2), arrowprops=arrow_kw2)
+ax.annotate('', xy=(5, 5.8), xytext=(7.5, 7.2), arrowprops=arrow_kw2)
+ax.annotate('', xy=(5, 2.3), xytext=(5, 4.2), arrowprops=arrow_kw2)
+ax.annotate('', xy=(2.5, 7.2), xytext=(4, 2.3), arrowprops=dict(
+    arrowstyle='->', linewidth=2, color='black', alpha=0.4,
+    connectionstyle='arc3,rad=-0.3'))
+ax.annotate('', xy=(7.5, 7.2), xytext=(6, 2.3), arrowprops=dict(
+    arrowstyle='->', linewidth=2, color='black', alpha=0.4,
+    connectionstyle='arc3,rad=0.3'))
+ax.text(5, 6.8, '???', fontsize=28, color='red', ha='center', fontweight='bold',
+        alpha=0.7)
+ax.set_title('LLM Self-Play\n(没有天然 reward — 需要 judge)', fontsize=12, fontweight='bold')
+ax.axis('off')
+
+plt.tight_layout(); plt.show()
+print('核心区别：AlphaZero 有"胜负"作为天然 reward；LLM 没有——所以 LLM self-play')
+print('必须引入一个 judge（人类或 AI），这正是 RLAIF / CAI 的动机。')
+
+###%% MD
+## 17.3 LLM Self-Play
+
+虽然 LLM 没有天然的"胜负"信号，研究者还是设计了几个巧妙的 self-play 范式。
+本节介绍两个代表：
+
+- **SPIN**（Singh et al. 2023, Self-Play fIne-tuNing）：用分类器区分"真人类 response" vs "自己生成的 response"，类似 GAN
+- **Self-Rewarding LM**（Yuan et al. 2024）：让 LLM 自己给自己的 response 打分
+
+### 17.3.1 SPIN（Self-Play fIne-tuNing）
+
+**SPIN 的核心洞察**（Singh 2023）：
+
+> 当前 LLM $\pi_\theta$ 生成的 response 分布 $\pi_\theta(y|x)$ 与"真人类"分布 $\pi_{human}(y|x)$ **不同**。
+> 如果能训练一个分类器区分两者，并用它做 reward，就能让 $\pi_\theta \to \pi_{human}$。
+
+这非常像 **GAN**（Generative Adversarial Networks）：
+
+| GAN | SPIN |
+|---|---|
+| generator 生成假数据 | LLM $\pi_\theta$ 生成 response |
+| discriminator 区分真假数据 | classifier 区分 human / $\pi_\theta$ response |
+| generator 骗 discriminator | $\pi_\theta$ 模仿 human |
+| 真数据：来自真实分布 | human response（来自 SFT 数据集） |
+
+### 17.3.2 SPIN 的数学形式化
+
+**分类器目标**（要 maximize）：
+
+$$
+\max_\phi \;
+\underbrace{\mathbb{E}_{y \sim \pi_{human}}[\log \sigma(f_\phi(x, y))]}_{\text{real should be high}}
++ \underbrace{\mathbb{E}_{y \sim \pi_\theta}[\log(1 - \sigma(f_\phi(x, y)))]}_{\text{fake should be low}}
+$$
+
+其中：
+- $f_\phi(x, y)$ 是分类器输出的 logit（"这是真人类的置信度"）
+- $\sigma$ 是 sigmoid
+- 第一项：真人类 response 的 logit 应该高
+- 第二项：$\pi_\theta$ 生成的 response 的 logit 应该低
+
+等价的 **loss 形式**（要 minimize）：
+
+$$
+\mathcal{L}_{SPIN}(\phi) =
+\underbrace{-\mathbb{E}_{y_{real}}[\log \sigma(f_\phi(x, y_{real}))]}_{\text{softplus}(-f_{real})}
++ \underbrace{-\mathbb{E}_{y_{fake}}[\log(1 - \sigma(f_\phi(x, y_{fake})))]}_{\text{softplus}(f_{fake})}
+$$
+
+然后 $\pi_\theta$ 用 $\sigma(f_\phi)$ 作 reward 做 RL（类似 DPO / RLHF）。
+
+### 17.3.3 SPIN 的收敛性
+
+**关键定理（Singh 2023）**：当 $\pi_\theta = \pi_{human}$ 时，分类器无法区分两者 →
+$f_\phi \to 0$ → $\sigma(f_\phi) \to 0.5$ → reward 均匀 → 训练停止。
+
+**直观**：分类器学不动 = 模型已经"骗"过分类器 = 模型分布 = 人类分布。
+
+这是 SPIN 的**自然停止条件**（类似 GAN 的 Nash 均衡）——不需要人为设定停止时机。
+
+### 17.3.4 SPIN 的实现
+
+我们的 `utils/self_play.py` 实现了 SPIN 的核心组件：
+
+```python
+def spin_objective(classifier, prompt_ids, real_response_ids, fake_response_ids):
+    f_real = classifier(prompt_ids, real_response_ids)
+    f_fake = classifier(prompt_ids, fake_response_ids)
+    loss_real = F.softplus(-f_real).mean()   # -log σ(f_real) = softplus(-f_real)
+    loss_fake = F.softplus(f_fake).mean()    # -log(1 - σ(f_fake)) = softplus(f_fake)
+    return loss_real + loss_fake, stats
+```
+
+下面跑一个 SPIN demo：让 actor 生成 fake response，用分类器区分 real vs fake。
+
+###%% CODE
+# 17.3.4 SPIN demo
+# 准备：用一个简单语料当 "human data"，训一个 SFT actor，然后跑 SPIN 迭代
+
+SPIN_VOCAB = "abcdefghij good bad yes no . "
+spin_tok = CharTokenizer().train(SPIN_VOCAB)
+print(f"vocab: {spin_tok.itos}")
+print(f"vocab_size = {spin_tok.vocab_size}, pad_id = {spin_tok.pad_id}")
+
+HUMAN_RESPONSES = ["good.", "yes good.", "good yes.", "very good."]
+SPIN_PROMPTS = ["Q: how A:", "Q: what A:", "Q: why A:", "Q: ok A:"]
+
+def make_human_samples(tokenizer, prompts, responses, n=40, seed=0):
+    rng = random.Random(seed)
+    out = []
+    for _ in range(n):
+        p = rng.choice(prompts)
+        r = rng.choice(responses)
+        out.append({
+            "prompt": p, "response": r,
+            "prompt_ids": tokenizer.encode(p),
+            "response_ids": tokenizer.encode(r),
+        })
+    return out
+
+human_samples = make_human_samples(spin_tok, SPIN_PROMPTS, HUMAN_RESPONSES, n=40, seed=0)
+print(f"\nHuman samples: {len(human_samples)}")
+print(f"  示例: {human_samples[0]['prompt']!r} -> {human_samples[0]['response']!r}")
+
+class ActorWrap(nn.Module):
+    def __init__(self, backbone):
+        super().__init__()
+        self.backbone = backbone
+    def forward(self, ids):
+        return self.backbone(ids)
+
+torch.manual_seed(42)
+spin_actor_bb = build_tiny_gpt(
+    vocab_size=spin_tok.vocab_size, d_model=24, n_heads=4,
+    n_layers=2, d_ff=48, max_seq_len=24,
+)
+spin_actor = ActorWrap(spin_actor_bb)
+print(f"\nSPIN actor 参数量: {count_parameters(spin_actor):,}")
+
+# 简单 SFT：让 actor 学会"yes." 这种短 response（故意和 human 不完全一样）
+SFT_RESPONSES_ALT = ["yes.", "no.", "yes no.", "no yes."]
+sft_samples = make_human_samples(spin_tok, SPIN_PROMPTS, SFT_RESPONSES_ALT, n=60, seed=1)
+
+opt = torch.optim.AdamW(spin_actor.parameters(), lr=3e-3, weight_decay=0.01)
+for it in range(60):
+    batch_idx = np.random.choice(len(sft_samples), 16, replace=False)
+    batch = [sft_samples[i] for i in batch_idx]
+    fulls = [torch.cat([s['prompt_ids'], s['response_ids']]) for s in batch]
+    masks = []
+    for s in batch:
+        m = torch.zeros(s['prompt_ids'].size(0) + s['response_ids'].size(0))
+        m[s['prompt_ids'].size(0):] = 1
+        masks.append(m)
+    max_len = max(f.size(0) for f in fulls)
+    full_b = torch.full((len(fulls), max_len), spin_tok.pad_id, dtype=torch.long)
+    mask_b = torch.zeros((len(fulls), max_len))
+    for i, (f, m) in enumerate(zip(fulls, masks)):
+        full_b[i, :f.size(0)] = f
+        mask_b[i, :m.size(0)] = m
+    logits = spin_actor(full_b)
+    loss = sft_loss(logits[:, :-1, :], full_b[:, 1:], mask_b[:, 1:])
+    opt.zero_grad(); loss.backward()
+    torch.nn.utils.clip_grad_norm_(spin_actor.parameters(), 1.0)
+    opt.step()
+print(f"SFT 完成 (60 iters)")
+
+###%% CODE
+# 17.3.4 跑 SPIN 迭代：训练分类器区分 real vs fake
+
+torch.manual_seed(42)
+clf_bb = build_tiny_gpt(
+    vocab_size=spin_tok.vocab_size, d_model=24, n_heads=4,
+    n_layers=2, d_ff=48, max_seq_len=24,
+)
+spin_clf = RewardModel(clf_bb)
+print(f"SPIN classifier 参数量: {count_parameters(spin_clf):,}")
+
+clf_opt = torch.optim.AdamW(spin_clf.parameters(), lr=2e-3, weight_decay=0.01)
+SPIN_ITERS = 30
+spin_history = []
+t0 = time.time()
+for it in range(SPIN_ITERS):
+    stats = spin_iteration(
+        spin_clf, spin_actor, human_samples, spin_tok, clf_opt,
+        max_new_tokens=6, temperature=1.0, batch_size=16, seed=it,
+    )
+    spin_history.append(stats)
+    if it % 5 == 0 or it == SPIN_ITERS - 1:
+        print(f"SPIN iter {it:>3} | loss = {stats['spin_loss']:.4f} | "
+              f"real_acc = {stats['real_acc']:.2f} | fake_acc = {stats['fake_acc']:.2f}")
+spin_time = time.time() - t0
+print(f"\nSPIN 训练耗时: {spin_time:.1f}s")
+
+###%% CODE
+# 17.3.4 SPIN 训练曲线
+fig, axes = plt.subplots(1, 2, figsize=(13, 4))
+
+ax = axes[0]
+spin_loss_hist = [h['spin_loss'] for h in spin_history]
+ax.plot(spin_loss_hist, color='#1f77b4', alpha=0.4, linewidth=0.7)
+w = 5
+sm = np.convolve(spin_loss_hist, np.ones(w)/w, mode='valid')
+ax.plot(np.arange(w-1, len(spin_loss_hist)), sm, color='#1f77b4',
+        linewidth=2.0, label=f'smoothed (w={w})')
+ax.set_xlabel('SPIN iteration'); ax.set_ylabel('classifier loss')
+ax.set_title('SPIN classifier loss (softplus(-f_real) + softplus(f_fake))')
+ax.legend(); ax.grid(True, alpha=0.3)
+
+ax = axes[1]
+real_accs = [h['real_acc'] for h in spin_history]
+fake_accs = [h['fake_acc'] for h in spin_history]
+ax.plot(real_accs, color='#2ca02c', linewidth=2.0, label='real acc (sigma(f_real) > 0.5)')
+ax.plot(fake_accs, color='#d62728', linewidth=2.0, label='fake acc (sigma(f_fake) < 0.5)')
+ax.axhline(0.5, color='gray', linestyle='--', alpha=0.5, label='chance level')
+ax.set_xlabel('SPIN iteration'); ax.set_ylabel('classifier accuracy')
+ax.set_title('SPIN: classifier distinguishing real vs fake')
+ax.legend(); ax.grid(True, alpha=0.3); ax.set_ylim(0, 1.05)
+plt.tight_layout(); plt.show()
+
+print('\n=== SPIN 分析 ===')
+print('分类器在 real / fake 上都接近 0.5（chance level）说明：')
+print('  - 分类器学不动 -> actor 生成的 response 已经和 human 接近 (Nash 均衡)')
+print('  - 或者：分类器容量太小、数据太少，学不到区分信号')
+print('  - 在本简化 demo 上，actor 容量小、SFT 数据和 human 数据高度相似，')
+print('    所以分类器难学到强信号——这是简化 demo 的预期行为。')
+print('真实 SPIN 论文（Singh 2023）用更大模型 + 更多数据，分类器能学到明显区分，')
+print('随着 SPIN 迭代，actor 逐步逼近 human 分布，分类器 acc 逐步降到 0.5。')
+
+###%% MD
+### 17.3.5 Self-Rewarding LM（Yuan et al. 2024）
+
+**Self-Rewarding LM** 的思路：让 LLM 自己给自己的 response 打分。
+
+Yuan 2024 的具体做法：
+
+1. 在 actor LLM 上加一个 **"Judge Head"**（与 LM head 并列的标量 head）
+2. 用一个特殊的 **evaluate prompt**（如 `"Evaluate this response 1-5: {response}. Rating:"`）
+3. actor 既负责生成 response，又负责评 response——**backbone 共享**
+4. 用 self-reward 做 DPO / RLHF，迭代更新
+
+**核心**：不需要外部 judge——**同一个 LLM 既当 player 又当 referee**。
+
+### 17.3.6 SPIN / Self-Rewarding 与 Ch11 RLHF 的对比
+
+| 维度 | Ch11 RLHF（人类标注） | SPIN（self-play） | Self-Rewarding（自评） |
+|---|---|---|---|
+| **数据来源** | 人类标注偏好对 | $\pi_\theta$ vs human | $\pi_\theta$ 自评 |
+| **reward 来源** | 训出的 RM | 分类器 $\sigma(f_\phi)$ | actor 的 judge head |
+| **是否需要人类数据** | ✅（pairwise） | 只需 SFT 数据 | 只需 SFT 数据 |
+| **收敛信号** | 无（人为停） | Nash 均衡（分类器学不动） | 无 |
+| **代表工作** | InstructGPT 2022 | Singh 2023 | Yuan 2024 |
+
+### 17.3.7 可视化：SPIN 的 GAN 结构
+
+###%% CODE
+# 17.3.7 SPIN 的 GAN 结构示意图
+fig, ax = plt.subplots(figsize=(11, 5))
+ax.set_xlim(0, 12); ax.set_ylim(0, 8); ax.axis('off')
+
+from matplotlib.patches import FancyBboxPatch
+ax.text(2, 6.5, 'Human Data', ha='center', va='center',
+        fontsize=11, fontweight='bold', color='#2ca02c')
+ax.text(2, 2, 'Actor (generate fake)', ha='center', va='center',
+        fontsize=11, fontweight='bold', color='#1f77b4')
+ax.text(7, 4, 'Classifier (real vs fake)', ha='center', va='center',
+        fontsize=11, fontweight='bold', color='#d62728')
+ax.text(11, 4, 'Reward (train actor)', ha='center', va='center',
+        fontsize=11, fontweight='bold', color='#ff7f0e')
+
+arrow_kw = dict(arrowstyle='->', linewidth=2.5, color='black', alpha=0.7)
+ax.annotate('', xy=(5.6, 4.8), xytext=(3.4, 6.0), arrowprops=arrow_kw)
+ax.annotate('', xy=(5.6, 3.2), xytext=(3.4, 2.5), arrowprops=arrow_kw)
+ax.annotate('', xy=(9.6, 4), xytext=(8.4, 4), arrowprops=arrow_kw)
+ax.annotate('', xy=(2, 2.8), xytext=(11, 3.2),
+            arrowprops=dict(arrowstyle='->', linewidth=2.5, color='#ff7f0e', alpha=0.6,
+                            connectionstyle='arc3,rad=-0.4'))
+
+ax.text(4.5, 5.5, 'real y', fontsize=10, color='#2ca02c', style='italic')
+ax.text(4.5, 2.5, 'fake y', fontsize=10, color='#1f77b4', style='italic')
+ax.text(6.5, 1.5, 'reward signal updates actor', fontsize=9, color='#ff7f0e',
+        style='italic', ha='center')
+
+ax.set_title('SPIN: Self-Play fIne-tuNing (Singh et al. 2023) — GAN-style self-play',
+             fontsize=13, fontweight='bold')
+plt.tight_layout(); plt.show()
+print('核心：分类器区分 human (real) 和 actor (fake) response；reward = sigma(f_phi)。')
+print('当 actor 逼近 human 分布 -> 分类器学不动 -> Nash 均衡 -> 自然停止。')
+
+###%% MD
+## 17.4 Constitutional AI / RLAIF（本章核心）
+
+### 17.4.1 Constitutional Principle（宪法原则）
+
+**Constitutional AI**（Bai et al. 2022, Anthropic）的核心创新：
+
+> 给 AI 一个 **"宪法"**（一组原则），让 AI **按这些原则自评**，不需要人类标注偏好。
+
+**Constitution** 是一组文本原则，每条原则描述一个期望的行为维度。Anthropic 的原文
+用了 ~16 条原则，覆盖 helpful / harmless / honest 等。本章简化成 3 条核心原则：
+
+| 原则 | 含义 | judge prompt |
+|---|---|---|
+| **helpful** | response 要直接回答问题、有用 | `"Rate this response on helpful (1-5): ..."` |
+| **harmless** | response 不含 harmful / toxic / dangerous 内容 | `"Rate this response on harmless (1-5): ..."` |
+| **honest** | response 要真实、不误导 | `"Rate this response on honest (1-5): ..."` |
+
+### 17.4.2 AI 按 constitution 自评
+
+给定 response $y$ 对 prompt $x$ 的回复，AI judge 按 constitution 评分的过程：
+
+```
+For each principle c_k in constitution:
+    judge_prompt = template(x, y, c_k)
+    score_k = LLM_judge(judge_prompt)  # 一个标量
+final_score = sum_k w_k * score_k
+```
+
+**最终 reward** 是各原则的加权和：
+
+$$
+r_{AI}(x, y) = \sum_{k=1}^{K} w_k \cdot r_{AI}^{(k)}(x, y)
+$$
+
+其中 $r_{AI}^{(k)}$ 是 LLM judge 按第 $k$ 条原则给 $y$ 的评分。
+
+### 17.4.3 RLAIF = RLHF 但 reward 换成 AI judge
+
+**RLAIF**（Lee et al. 2023, *RL from AI Feedback*）的精确数学定义：
+
+> **RLAIF = RLHF，但 reward model 替换为"AI 评判器"。**
+
+形式化：
+
+| 步骤 | RLHF（Ch11-13） | RLAIF（本章） |
+|---|---|---|
+| **1. 数据来源** | 人类标注 winner/loser 对 | AI judge 给 winner/loser 对 |
+| **2. RM 训练** | Bradley-Terry loss（同） | Bradley-Terry loss（同） |
+| **3. RL 训练** | PPO / GRPO（同） | PPO / GRPO（同） |
+| **唯一区别** | reward 来自人类偏好 | reward 来自 AI judge |
+
+**关键观察**：RLAIF 和 RLHF **完全共用 pipeline**——只是 reward 信号来源不同。
+这就是为什么本章可以直接复用 Ch11-13 的所有基础设施。
+
+### 17.4.4 Anthropic 的 CAI pipeline
+
+Anthropic 的完整 CAI pipeline（Bai 2022）：
+
+```
+[SFT model] -> generate response pairs -> [AI judge] -> [AI preference pairs]
+                                                          |
+                                                          v
+                                                    [train RM]
+                                                          |
+                                                          v
+                                                  [RL: PPO/GRPO]
+                                                          |
+                                                          v
+                                                  RLAIF-trained actor
+                (CAI-RLHF, 用 AI feedback 替代 human feedback)
+```
+
+**两个阶段**：
+
+1. **SFT**：正常的 supervised fine-tuning（这一步还是用人类数据）
+2. **CAI-RLHF**：把 RLHF 的人类反馈换成 AI feedback（reward 用 AI judge）
+
+**Lee 2023 的实验结论**：在 summarization / helpfulness 任务上，
+**RLAIF 的效果与 RLHF 相当**（人类评估者无法显著区分两者）——这是 RLAIF 路线的
+关键支撑证据。
+
+### 17.4.5 AI judge 的 bias 问题（重要）
+
+虽然 RLAIF 在平均效果上接近 RLHF，但 AI judge 有几个已知 bias（Lee 2023 / Zheng 2023）：
+
+| Bias | 表现 | 缓解 |
+|---|---|---|
+| **长度偏好** | AI judge 倾向给长 response 高分 | 加长度惩罚 |
+| **自我偏好** | AI judge 倾向给自己风格的 response 高分 | 用异构 judge |
+| **位置偏好** | 在 pairwise 比较时倾向选先出现的 | 随机化顺序 |
+| **format 偏好** | 倾向 markdown / 列表格式 | 格式归一化 |
+
+本章的 `AIJudge` 用一个 `length_bias` 参数显式模拟长度偏好——让我们可以在实验里
+**量化**这种 bias 的影响。
+
+###%% CODE
+# 17.4.5 演示 Constitution 的构造和 judge prompt
+default_constitution = Constitution()
+print(f"Default constitution: {len(default_constitution)} principles")
+for p in default_constitution:
+    print(f"  - [{p['name']}] (weight={p['weight']}) {p['description']}")
+
+print()
+print("Judge prompt 示例（让 LLM 评一个 response 是否 helpful）:")
+sample_response = "I think the weather is good today."
+judge_prompt = default_constitution.make_judge_prompt(sample_response, principle_idx=0)
+print(judge_prompt)
+print()
+
+custom_constitution = Constitution(principles=[
+    {"name": "polite", "description": "response should be polite and respectful", "weight": 0.5},
+    {"name": "concise", "description": "response should be short and to the point", "weight": 0.5},
+    {"name": "accurate", "description": "response should contain only correct facts", "weight": 1.0},
+    {"name": "safe", "description": "response must not help with dangerous activities", "weight": 2.0},
+])
+print(f"Custom constitution: {len(custom_constitution)} principles")
+for p in custom_constitution:
+    print(f"  - [{p['name']}] (weight={p['weight']}) {p['description']}")
+
+###%% CODE
+# 17.4.5 可视化：Constitution principle 列表
+fig, ax = plt.subplots(figsize=(11, 5))
+ax.axis('off')
+
+principles = list(default_constitution)
+colors = ['#2ca02c', '#d62728', '#1f77b4']
+for i, (p, c) in enumerate(zip(principles, colors)):
+    y = 0.85 - i * 0.3
+    ax.text(0.05, y, p['name'].upper(), fontsize=14, fontweight='bold',
+            color=c, transform=ax.transAxes)
+    ax.text(0.25, y, p['description'], fontsize=11, color='black',
+            transform=ax.transAxes, wrap=True)
+    ax.text(0.85, y, f"w = {p['weight']}", fontsize=11, color='gray',
+            transform=ax.transAxes)
+    if i < len(principles) - 1:
+        ax.plot([0.05, 0.95], [y - 0.15, y - 0.15], color='gray', alpha=0.3,
+                transform=ax.transAxes)
+
+ax.text(0.5, 0.95, 'Constitutional AI Principles (Bai et al. 2022)',
+        fontsize=14, fontweight='bold', ha='center', transform=ax.transAxes)
+ax.text(0.5, 0.05, 'Final reward: r_AI(x,y) = sum_k w_k * r_AI^(k)(x,y)',
+        fontsize=11, ha='center', transform=ax.transAxes, style='italic')
+
+plt.tight_layout(); plt.show()
+
+###%% MD
+## 17.5 实现：在 TinyGPT 上做简化 RLAIF
+
+本节用本章的 `AIJudge` + Ch11 的 RM + Ch13 的 GRPO，完整跑通一个简化 RLAIF pipeline。
+
+### 17.5.1 实验设计
+
+```
+                  AIJudge (TinyGPT + judge head)
+                         |
+                         v
+[actor] -> generate responses -> [AI judge] -> AI preference pairs
+                                                          |
+                                                          v
+                                                    [train RM]  (Ch11)
+                                                          |
+                                                          v
+                                              [GRPO]  (Ch13, reward=RM)
+                                                          |
+                                                          v
+                                                    RLAIF-trained actor
+```
+
+**对照**：与 Ch11 的人类标注 RM 对比，看 AI judge RM 能不能达到相近效果。
+
+### 17.5.2 准备 actor（用 Ch16 的两步加法任务）
+
+我们复用 Ch16 的两步加法任务（`a+b+c=` → `a+b=s1;s1+c=s2`），因为：
+
+- 任务有明确的 ground truth（答案对错可验证）
+- 之前已经有训好的 PRM / ORM 可对照
+- TinyGPT 在这个任务上能学到 ~80% 准确率
+
+###%% CODE
+# 17.5.2 准备 actor（用 Ch16 的两步加法任务）
+from utils.prm import (
+    make_two_step_addition_dataset, encode_two_step_sample,
+    make_wrong_step_variations, parse_two_step_response,
+    evaluate_two_step_accuracy,
+)
+
+ARITH_VOCAB = "0123456789+=;"
+tokenizer = CharTokenizer().train(ARITH_VOCAB)
+print(f"vocab: {list(tokenizer.itos)}")
+print(f"vocab_size = {tokenizer.vocab_size}, pad_id = {tokenizer.pad_id}")
+
+train_data = make_two_step_addition_dataset(n_samples=400, max_digit=4, seed=0)
+test_data = make_two_step_addition_dataset(n_samples=150, max_digit=4, seed=99)
+print(f"\n训练: {len(train_data)} 条, 测试: {len(test_data)} 条")
+print(f"示例: {train_data[0]['prompt']!r} -> {train_data[0]['response']!r}")
+
+torch.manual_seed(42)
+actor_backbone = build_tiny_gpt(
+    vocab_size=tokenizer.vocab_size, d_model=32, n_heads=4,
+    n_layers=2, d_ff=64, max_seq_len=32,
+)
+class ActorWrap(nn.Module):
+    def __init__(self, backbone):
+        super().__init__()
+        self.backbone = backbone
+    def forward(self, ids):
+        return self.backbone(ids)
+
+actor = ActorWrap(actor_backbone)
+ACTOR_PARAMS = count_parameters(actor)
+print(f"\nactor 参数量: {ACTOR_PARAMS:,}")
+
+def make_sft_batch(samples, tokenizer, bs=16):
+    fulls = []; masks = []
+    for s in samples:
+        p = tokenizer.encode(s['prompt'])
+        r = tokenizer.encode(s['response'])
+        full = torch.cat([p, r])
+        mask = torch.zeros_like(full)
+        mask[p.size(0):] = 1
+        fulls.append(full); masks.append(mask)
+    max_len = max(f.size(0) for f in fulls)
+    full_b = torch.full((len(fulls), max_len), tokenizer.pad_id, dtype=torch.long)
+    mask_b = torch.zeros((len(fulls), max_len))
+    for i, (f, m) in enumerate(zip(fulls, masks)):
+        full_b[i, :f.size(0)] = f
+        mask_b[i, :m.size(0)] = m
+    return full_b, mask_b
+
+opt = torch.optim.AdamW(actor.parameters(), lr=3e-3, weight_decay=0.01)
+SFT_ITERS = 150
+loss_hist = []
+t0 = time.time()
+for it in range(SFT_ITERS):
+    idx = np.random.choice(len(train_data), 16, replace=False)
+    batch_s = [train_data[i] for i in idx]
+    full_b, mask_b = make_sft_batch(batch_s, tokenizer)
+    logits = actor(full_b)
+    loss = sft_loss(logits[:, :-1, :], full_b[:, 1:], mask_b[:, 1:])
+    opt.zero_grad(); loss.backward()
+    torch.nn.utils.clip_grad_norm_(actor.parameters(), 1.0)
+    opt.step()
+    loss_hist.append(float(loss))
+sft_time = time.time() - t0
+print(f"SFT 完成 ({SFT_ITERS} iters), 耗时 {sft_time:.1f}s, final loss = {loss_hist[-1]:.4f}")
+
+eval_prompts = [s['prompt'] for s in test_data[:40]]
+sft_eval = evaluate_two_step_accuracy(actor, tokenizer, eval_prompts,
+                                       max_new_tokens=12, greedy=True)
+print(f"\nSFT baseline (n=40):")
+print(f"  step1 acc = {sft_eval['step1_acc']:.2%}")
+print(f"  step2 acc = {sft_eval['step2_acc']:.2%}")
+print(f"  final acc = {sft_eval['final_acc']:.2%}")
+
+###%% MD
+### 17.5.3 构造 AIJudge（同一个 TinyGPT backbone + judge head）
+
+我们的 `AIJudge` 复用 TinyGPT backbone，加一个独立的 reward head
+（LayerNorm + Linear，与 Ch11 RewardModel 完全一致）。
+
+**关键设计**：
+
+- AIJudge 的 backbone **可以是 actor 的拷贝**（模拟"同一个 LLM 既当 actor 又当 judge"）
+- 也可以是**独立初始化**的（模拟"独立的 judge 模型"）
+- 两种都跑——看哪种效果好
+
+**模拟 RLAIF 的 judge bias**：默认 `length_bias=0.0`（无 bias），
+但我们会对比 `length_bias=0.1`（轻微长度偏好）看 bias 的影响。
+
+###%% CODE
+# 17.5.3 构造 AIJudge
+
+torch.manual_seed(42)
+judge_bb_indep = build_tiny_gpt(
+    vocab_size=tokenizer.vocab_size, d_model=32, n_heads=4,
+    n_layers=2, d_ff=64, max_seq_len=32,
+)
+ai_judge_indep = AIJudge(judge_bb_indep, length_bias=0.0)
+JUDGE_PARAMS_INDEP = count_parameters(ai_judge_indep)
+print(f"AIJudge (independent backbone) 参数量: {JUDGE_PARAMS_INDEP:,}")
+
+torch.manual_seed(42)
+judge_bb_shared = build_tiny_gpt(
+    vocab_size=tokenizer.vocab_size, d_model=32, n_heads=4,
+    n_layers=2, d_ff=64, max_seq_len=32,
+)
+judge_bb_shared.load_state_dict(actor_backbone.state_dict())
+ai_judge_shared = AIJudge(judge_bb_shared, length_bias=0.0)
+JUDGE_PARAMS_SHARED = count_parameters(ai_judge_shared)
+print(f"AIJudge (shared actor backbone) 参数量: {JUDGE_PARAMS_SHARED:,}")
+
+torch.manual_seed(42)
+judge_bb_bias = build_tiny_gpt(
+    vocab_size=tokenizer.vocab_size, d_model=32, n_heads=4,
+    n_layers=2, d_ff=64, max_seq_len=32,
+)
+judge_bb_bias.load_state_dict(actor_backbone.state_dict())
+ai_judge_bias = AIJudge(judge_bb_bias, length_bias=0.1)
+print(f"AIJudge (length_bias=0.1) 参数量: {count_parameters(ai_judge_bias):,}")
+
+prompt_test = "2+3+1="
+p_ids = tokenizer.encode(prompt_test).unsqueeze(0)
+print(f"\n示例 prompt: {prompt_test!r}")
+print(f"\nAI judge 评分对比:")
+print(f"  {'response':<20} {'indep':>8} {'shared':>8} {'biased':>8}  {'true_correct':<10}")
+test_responses = [
+    ("2+3=5;5+1=6",   True),
+    ("2+3=4;4+1=5",   False),
+    ("2+3=5;5+1=9",   False),
+    ("2+3=5;5+1=6;",  True),
+]
+for resp_str, correct in test_responses:
+    r_ids = tokenizer.encode(resp_str).unsqueeze(0)
+    mask = torch.ones(1, r_ids.size(1))
+    s_i = float(ai_judge_indep(p_ids, r_ids, response_mask=mask).item())
+    s_s = float(ai_judge_shared(p_ids, r_ids, response_mask=mask).item())
+    s_b = float(ai_judge_bias(p_ids, r_ids, response_mask=mask).item())
+    mark = 'OK' if correct else 'X'
+    print(f"  {resp_str:<20} {s_i:>8.3f} {s_s:>8.3f} {s_b:>8.3f}  {mark}")
+print()
+print('观察: biased judge 给长 response（多一个 ;）的分数更高（长度偏好的体现）。')
+print('      这就是 RLAIF 的已知 bias——需要在 RM 训练 / reward 计算时缓解。')
+
+###%% MD
+### 17.5.4 用 AIJudge 生成 AI 偏好对（替代 Ch11 的人类标注）
+
+这是 RLAIF 的核心数据生成步骤：
+
+1. 用 actor 对每个 prompt 采 N 个 response
+2. 用 AIJudge 给每个 response 打分
+3. 构造 pairwise 偏好对（score 高的是 winner，低的是 loser）
+
+生成的偏好对格式与 Ch11 的 `generate_preference_data` **完全一致**——
+可以直接喂给 `bradley_terry_loss` 训 RM。
+
+###%% CODE
+# 17.5.4 用 AIJudge 生成 AI 偏好对
+torch.manual_seed(42)
+np.random.seed(42)
+
+rlaif_prompts = list(set([s['prompt'] for s in train_data[:100]]))
+print(f"Prompts for AI preference generation: {len(rlaif_prompts)}")
+
+t0 = time.time()
+ai_pairs = generate_ai_preferences(
+    actor, ai_judge_shared, tokenizer, rlaif_prompts,
+    n_per_prompt=3, max_new_tokens=11, temperature=1.0, seed=0,
+)
+rlaif_data_time = time.time() - t0
+print(f"\n生成 {len(ai_pairs)} 个 AI 偏好对，耗时 {rlaif_data_time:.1f}s")
+print(f"\n前 5 个 AI 偏好对:")
+for i, p in enumerate(ai_pairs[:5]):
+    print(f"  [{i}] prompt={p['prompt']!r}")
+    print(f"       winner={p['winner']!r} (r_w={p['r_w']:.3f})")
+    print(f"       loser ={p['loser']!r}  (r_l={p['r_l']:.3f})")
+
+def make_human_pairs_for_arith(samples, tokenizer, seed=0):
+    # 用 Ch11 风格的 ground-truth 规则生成人类偏好对（对照）
+    rng = random.Random(seed)
+    out = []
+    for s in samples:
+        variants = make_wrong_step_variations(s, n_wrong=1, seed=rng.randint(0, 99999))
+        for v in variants:
+            if s.get('final_correct', True) and not v.get('final_correct', False):
+                out.append({
+                    "prompt": s["prompt"],
+                    "winner": s["response"],
+                    "loser": v["response"],
+                    "prompt_ids": tokenizer.encode(s["prompt"]),
+                    "winner_ids": tokenizer.encode(s["response"]),
+                    "loser_ids": tokenizer.encode(v["response"]),
+                    "r_w": 1.0, "r_l": 0.0, "r_diff": 1.0,
+                    "source": "human_rule",
+                })
+    rng.shuffle(out)
+    return out
+
+human_pairs = make_human_pairs_for_arith(train_data[:100], tokenizer, seed=0)
+print(f"\n对照: {len(human_pairs)} 个人类偏好对（用规则模拟人类标注）")
+print(f"\n前 3 个人类偏好对:")
+for i, p in enumerate(human_pairs[:3]):
+    print(f"  [{i}] prompt={p['prompt']!r}")
+    print(f"       winner={p['winner']!r}  loser={p['loser']!r}")
+
+###%% CODE
+# 17.5.4 可视化：AI judge 评分分布（vs ground truth）
+
+np.random.seed(42)
+sample_for_viz = []
+for s in train_data[:50]:
+    sample_for_viz.append((s['prompt'], s['response'], True))
+    variants = make_wrong_step_variations(s, n_wrong=1, seed=42)
+    if variants:
+        sample_for_viz.append((s['prompt'], variants[0]['response'], False))
+
+ai_scores_correct = []
+ai_scores_wrong = []
+for prompt_str, resp_str, correct in sample_for_viz:
+    p_ids = tokenizer.encode(prompt_str).unsqueeze(0)
+    r_ids = tokenizer.encode(resp_str).unsqueeze(0)
+    mask = torch.ones(1, r_ids.size(1))
+    with torch.no_grad():
+        s = float(ai_judge_shared(p_ids, r_ids, response_mask=mask).item())
+    if correct:
+        ai_scores_correct.append(s)
+    else:
+        ai_scores_wrong.append(s)
+
+fig, ax = plt.subplots(figsize=(9, 4.5))
+bins = np.linspace(min(min(ai_scores_correct), min(ai_scores_wrong)) - 0.1,
+                    max(max(ai_scores_correct), max(ai_scores_wrong)) + 0.1, 25)
+ax.hist(ai_scores_correct, bins=bins, alpha=0.6, color='#2ca02c',
+        label=f'correct (n={len(ai_scores_correct)})', edgecolor='black')
+ax.hist(ai_scores_wrong, bins=bins, alpha=0.6, color='#d62728',
+        label=f'wrong (n={len(ai_scores_wrong)})', edgecolor='black')
+ax.axvline(np.mean(ai_scores_correct), color='#2ca02c', linestyle='--', linewidth=2,
+           label=f'mean correct = {np.mean(ai_scores_correct):.2f}')
+ax.axvline(np.mean(ai_scores_wrong), color='#d62728', linestyle='--', linewidth=2,
+           label=f'mean wrong = {np.mean(ai_scores_wrong):.2f}')
+ax.set_xlabel('AI Judge score'); ax.set_ylabel('count')
+ax.set_title('AI judge scores: correct vs wrong responses\n'
+             '(ideal: correct should have higher scores)')
+ax.legend(); ax.grid(True, alpha=0.3)
+plt.tight_layout(); plt.show()
+
+sep = np.mean(ai_scores_correct) - np.mean(ai_scores_wrong)
+print(f"\n观察: AI judge 给 correct response 的均分 {np.mean(ai_scores_correct):.3f},")
+print(f"      给 wrong response 的均分 {np.mean(ai_scores_wrong):.3f},")
+print(f"      separation = {sep:.3f}")
+print(f"理想情况下 correct 应明显高于 wrong——AI judge 区分能力越强 RLAIF 效果越好。")
+print(f"\n注意：本简化 AIJudge 的 backbone 未在偏好数据上训过（直接用 SFT actor），")
+print(f"区分能力有限——真实 RLAIF 会用更大模型或 fine-tune judge head。")
+
+###%% MD
+### 17.5.5 训 RM（用 AI 偏好对）—— RLAIF 的第二步
+
+用 AI judge 生成的偏好对训练一个 RM（同 Ch11 的 Bradley-Terry loss）。
+
+**关键对比**：
+
+- **Ch11 RLHF**：用人类标注的偏好对训 RM
+- **Ch17 RLAIF**：用 AI judge 生成的偏好对训 RM
+- **loss 相同**（都是 Bradley-Terry），只是数据来源不同
+
+###%% CODE
+# 17.5.5 训两个 RM：一个用 AI 偏好对（RLAIF），一个用人类偏好对（RLHF 对照）
+
+torch.manual_seed(42)
+rlaif_rm_bb = build_tiny_gpt(
+    vocab_size=tokenizer.vocab_size, d_model=32, n_heads=4,
+    n_layers=2, d_ff=64, max_seq_len=32,
+)
+rlaif_rm = RewardModel(rlaif_rm_bb)
+RLAIF_RM_PARAMS = count_parameters(rlaif_rm)
+print(f"RLAIF RM 参数量: {RLAIF_RM_PARAMS:,}")
+
+rlaif_rm_opt = torch.optim.AdamW(rlaif_rm.parameters(), lr=2e-3, weight_decay=0.01)
+RLAIF_RM_ITERS = 150
+rlaif_rm_loss = []
+rlaif_rm_acc = []
+t0 = time.time()
+for it in range(RLAIF_RM_ITERS):
+    if len(ai_pairs) == 0:
+        print("WARNING: ai_pairs 为空，跳过 RM 训练")
+        break
+    idx = np.random.choice(len(ai_pairs), min(16, len(ai_pairs)), replace=False)
+    batch = [ai_pairs[i] for i in idx]
+    p_b = pad_to_length([b['prompt_ids'] for b in batch], tokenizer.pad_id)
+    w_b = pad_to_length([b['winner_ids'] for b in batch], tokenizer.pad_id)
+    l_b = pad_to_length([b['loser_ids'] for b in batch], tokenizer.pad_id)
+    loss = bradley_terry_loss(rlaif_rm, p_b, w_b, l_b)
+    rlaif_rm_opt.zero_grad(); loss.backward()
+    torch.nn.utils.clip_grad_norm_(rlaif_rm.parameters(), 1.0)
+    rlaif_rm_opt.step()
+    rlaif_rm_loss.append(float(loss))
+    with torch.no_grad():
+        r_w = rlaif_rm(p_b, w_b); r_l = rlaif_rm(p_b, l_b)
+        acc = (r_w > r_l).float().mean().item()
+    rlaif_rm_acc.append(acc)
+    if it % 50 == 0 or it == RLAIF_RM_ITERS - 1:
+        print(f"RLAIF RM iter {it:>3} | loss = {float(loss):.4f} | acc = {acc:.3f}")
+rlaif_rm_time = time.time() - t0
+print(f"RLAIF RM 训练耗时: {rlaif_rm_time:.1f}s\n")
+
+torch.manual_seed(42)
+human_rm_bb = build_tiny_gpt(
+    vocab_size=tokenizer.vocab_size, d_model=32, n_heads=4,
+    n_layers=2, d_ff=64, max_seq_len=32,
+)
+human_rm = RewardModel(human_rm_bb)
+HUMAN_RM_PARAMS = count_parameters(human_rm)
+print(f"Human RM 参数量: {HUMAN_RM_PARAMS:,}")
+
+human_rm_opt = torch.optim.AdamW(human_rm.parameters(), lr=2e-3, weight_decay=0.01)
+HUMAN_RM_ITERS = 150
+human_rm_loss = []
+human_rm_acc = []
+t0 = time.time()
+for it in range(HUMAN_RM_ITERS):
+    idx = np.random.choice(len(human_pairs), min(16, len(human_pairs)), replace=False)
+    batch = [human_pairs[i] for i in idx]
+    p_b = pad_to_length([b['prompt_ids'] for b in batch], tokenizer.pad_id)
+    w_b = pad_to_length([b['winner_ids'] for b in batch], tokenizer.pad_id)
+    l_b = pad_to_length([b['loser_ids'] for b in batch], tokenizer.pad_id)
+    loss = bradley_terry_loss(human_rm, p_b, w_b, l_b)
+    human_rm_opt.zero_grad(); loss.backward()
+    torch.nn.utils.clip_grad_norm_(human_rm.parameters(), 1.0)
+    human_rm_opt.step()
+    human_rm_loss.append(float(loss))
+    with torch.no_grad():
+        r_w = human_rm(p_b, w_b); r_l = human_rm(p_b, l_b)
+        acc = (r_w > r_l).float().mean().item()
+    human_rm_acc.append(acc)
+    if it % 50 == 0 or it == HUMAN_RM_ITERS - 1:
+        print(f"Human RM iter {it:>3} | loss = {float(loss):.4f} | acc = {acc:.3f}")
+human_rm_time = time.time() - t0
+print(f"Human RM 训练耗时: {human_rm_time:.1f}s")
+
+###%% CODE
+# 17.5.5 RLAIF RM vs Human RM 训练曲线对比
+fig, axes = plt.subplots(1, 2, figsize=(13, 4))
+
+ax = axes[0]
+ax.plot(rlaif_rm_loss, color='#9467bd', alpha=0.3, linewidth=0.6)
+ax.plot(human_rm_loss, color='#17becf', alpha=0.3, linewidth=0.6)
+w = 15
+if len(rlaif_rm_loss) >= w:
+    sm_r = np.convolve(rlaif_rm_loss, np.ones(w)/w, mode='valid')
+    sm_h = np.convolve(human_rm_loss, np.ones(w)/w, mode='valid')
+    ax.plot(np.arange(w-1, len(rlaif_rm_loss)), sm_r, color='#9467bd',
+            linewidth=2.0, label=f'RLAIF RM (AI pairs)')
+    ax.plot(np.arange(w-1, len(human_rm_loss)), sm_h, color='#17becf',
+            linewidth=2.0, label=f'Human RM (rule-based pairs)')
+ax.axhline(math.log(2), color='gray', linestyle='--', alpha=0.5, label=f'log(2) chance')
+ax.set_xlabel('iteration'); ax.set_ylabel('Bradley-Terry loss')
+ax.set_title('RM training loss: RLAIF vs Human'); ax.legend(); ax.grid(True, alpha=0.3)
+
+ax = axes[1]
+ax.plot(rlaif_rm_acc, color='#9467bd', alpha=0.3, linewidth=0.6)
+ax.plot(human_rm_acc, color='#17becf', alpha=0.3, linewidth=0.6)
+if len(rlaif_rm_acc) >= w:
+    sm_r = np.convolve(rlaif_rm_acc, np.ones(w)/w, mode='valid')
+    sm_h = np.convolve(human_rm_acc, np.ones(w)/w, mode='valid')
+    ax.plot(np.arange(w-1, len(rlaif_rm_acc)), sm_r, color='#9467bd',
+            linewidth=2.0, label='RLAIF RM')
+    ax.plot(np.arange(w-1, len(human_rm_acc)), sm_h, color='#17becf',
+            linewidth=2.0, label='Human RM')
+ax.axhline(0.5, color='gray', linestyle='--', alpha=0.5, label='chance')
+ax.set_xlabel('iteration'); ax.set_ylabel('training accuracy')
+ax.set_title('RM training accuracy: RLAIF vs Human')
+ax.legend(); ax.grid(True, alpha=0.3); ax.set_ylim(0, 1.05)
+plt.tight_layout(); plt.show()
+
+print('\n=== RM 训练对比 ===')
+print(f'RLAIF RM: final loss = {rlaif_rm_loss[-1]:.4f}, final acc = {rlaif_rm_acc[-1]:.3f}')
+print(f'Human RM: final loss = {human_rm_loss[-1]:.4f}, final acc = {human_rm_acc[-1]:.3f}')
+print()
+print('观察: Human RM（用清晰的 ground-truth 偏好）acc 通常更高，loss 更低；')
+print('      RLAIF RM（用 AI judge 噪声偏好）acc 较低——AI judge 有 bias 和 noise。')
+print('      这正是 RLAIF 的代价——但 RLAIF 不需要人类标注，可以无限 scale。')
+
+###%% MD
+### 17.5.6 RLAIF-GRPO：用 AI RM 做 GRPO
+
+接下来用 RLAIF RM 做 GRPO（Ch13），看 RLAIF 训出的 actor 与 Human RM 训出的 actor 对比。
+
+###%% CODE
+# 17.5.6 RLAIF-GRPO vs Human-GRPO
+torch.manual_seed(42)
+np.random.seed(42)
+random.seed(42)
+
+GRPO_ITERS = 25
+G_SIZE = 6
+RESP_LEN = 11
+
+def make_actor_copy():
+    bb = build_tiny_gpt(
+        vocab_size=tokenizer.vocab_size, d_model=32, n_heads=4,
+        n_layers=2, d_ff=64, max_seq_len=32,
+    )
+    bb.load_state_dict(actor_backbone.state_dict())
+    return ActorWrap(bb)
+
+grpo_prompt_pool = [tokenizer.encode(s['prompt']) for s in train_data[:30]]
+
+print('=' * 60)
+print('Human-GRPO (Ch11-13 baseline)')
+print('=' * 60)
+torch.manual_seed(42)
+human_actor = make_actor_copy()
+human_ref = make_actor_copy()
+human_cfg = GRPOConfig(
+    group_size=G_SIZE, beta=0.01, clip_eps=0.2,
+    update_epochs=2, inner_minibatch_size=6,
+    entropy_coef=0.005, max_grad_norm=0.5,
+    target_kl=0.05, response_max_len=RESP_LEN,
+    temperature=1.0, top_k=None,
+    actor_lr=5e-5, print_every=10,
+)
+human_grpo = GRPOTrainer(human_actor, human_rm, human_ref,
+                          pad_id=tokenizer.pad_id, cfg=human_cfg, device='cpu')
+t0 = time.time()
+human_history = human_grpo.train(grpo_prompt_pool, n_iters=GRPO_ITERS,
+                                  n_prompts_per_iter=2, verbose=True)
+human_grpo_time = time.time() - t0
+print(f'Human-GRPO 训练耗时: {human_grpo_time:.1f}s')
+
+print('\n' + '=' * 60)
+print('RLAIF-GRPO (本章新方法)')
+print('=' * 60)
+torch.manual_seed(42)
+rlaif_actor = make_actor_copy()
+rlaif_ref = make_actor_copy()
+rlaif_cfg = GRPOConfig(
+    group_size=G_SIZE, beta=0.01, clip_eps=0.2,
+    update_epochs=2, inner_minibatch_size=6,
+    entropy_coef=0.005, max_grad_norm=0.5,
+    target_kl=0.05, response_max_len=RESP_LEN,
+    temperature=1.0, top_k=None,
+    actor_lr=5e-5, print_every=10,
+)
+rlaif_grpo = GRPOTrainer(rlaif_actor, rlaif_rm, rlaif_ref,
+                          pad_id=tokenizer.pad_id, cfg=rlaif_cfg, device='cpu')
+t0 = time.time()
+rlaif_history = rlaif_grpo.train(grpo_prompt_pool, n_iters=GRPO_ITERS,
+                                  n_prompts_per_iter=2, verbose=True)
+rlaif_grpo_time = time.time() - t0
+print(f'RLAIF-GRPO 训练耗时: {rlaif_grpo_time:.1f}s')
+
+###%% CODE
+# 17.5.6 RLAIF-GRPO vs Human-GRPO 训练曲线对比
+fig, axes = plt.subplots(1, 2, figsize=(13, 4.5))
+
+ax = axes[0]
+human_r = [h['mean_reward'] for h in human_history]
+rlaif_r = [h['mean_reward'] for h in rlaif_history]
+ax.plot(human_r, color='#17becf', alpha=0.4, linewidth=0.7, label='Human-GRPO (raw)')
+ax.plot(rlaif_r, color='#9467bd', alpha=0.4, linewidth=0.7, label='RLAIF-GRPO (raw)')
+w = 5
+if len(human_r) >= w:
+    ax.plot(np.convolve(human_r, np.ones(w)/w, mode='valid'),
+            color='#17becf', linewidth=2.0, label=f'Human (smooth)')
+    ax.plot(np.convolve(rlaif_r, np.ones(w)/w, mode='valid'),
+            color='#9467bd', linewidth=2.0, label=f'RLAIF (smooth)')
+ax.set_xlabel('GRPO iteration'); ax.set_ylabel('mean reward')
+ax.set_title('Reward during GRPO training'); ax.legend(); ax.grid(True, alpha=0.3)
+
+ax = axes[1]
+human_kl = [h['mean_kl_to_ref'] for h in human_history]
+rlaif_kl = [h['mean_kl_to_ref'] for h in rlaif_history]
+ax.plot(human_kl, color='#17becf', linewidth=2.0, label='Human-GRPO')
+ax.plot(rlaif_kl, color='#9467bd', linewidth=2.0, label='RLAIF-GRPO')
+ax.set_xlabel('GRPO iteration'); ax.set_ylabel('KL(actor || ref)')
+ax.set_title('KL divergence to reference'); ax.legend(); ax.grid(True, alpha=0.3)
+plt.tight_layout(); plt.show()
+
+print('\n=== GRPO 训练后准确率对比 ===')
+eval_prompts_grpo = [s['prompt'] for s in test_data[:50]]
+sft_baseline = evaluate_two_step_accuracy(actor, tokenizer, eval_prompts_grpo,
+                                           max_new_tokens=12, greedy=True)
+human_eval = evaluate_two_step_accuracy(human_actor, tokenizer, eval_prompts_grpo,
+                                         max_new_tokens=12, greedy=True)
+rlaif_eval = evaluate_two_step_accuracy(rlaif_actor, tokenizer, eval_prompts_grpo,
+                                         max_new_tokens=12, greedy=True)
+print(f'SFT baseline (no GRPO):  final_acc = {sft_baseline["final_acc"]:.2%}')
+print(f'Human-GRPO ({GRPO_ITERS} iters):    final_acc = {human_eval["final_acc"]:.2%} '
+      f'(delta={human_eval["final_acc"] - sft_baseline["final_acc"]:+.2%})')
+print(f'RLAIF-GRPO ({GRPO_ITERS} iters):    final_acc = {rlaif_eval["final_acc"]:.2%} '
+      f'(delta={rlaif_eval["final_acc"] - sft_baseline["final_acc"]:+.2%})')
+print()
+print('解读：')
+print('  - 简化任务 + 短 GRPO + 高 lr，两者都可能比 baseline 略退化（与 Ch16 同样现象）')
+print('  - 关键是流程跑通：AI judge -> 偏好对 -> RM -> GRPO 完整 RLAIF pipeline')
+print('  - 真实场景：RLAIF 在 summarization / helpfulness 上接近 RLHF（Lee 2023）')
+
+###%% MD
+## 17.6 Self-Play vs RLAIF 对比
+
+### 17.6.1 两条路径的本质区别
+
+| 维度 | Self-Play | RLAIF |
+|---|---|---|
+| **数据来源** | agent vs agent（互相对抗） | AI judge（外部评判） |
+| **reward 信号** | 内在（胜负、分类器输出） | 外在（constitution） |
+| **是否需要外部评判** | 不需要（agent 自己定胜负） | **需要**（AI judge） |
+| **代表方法** | AlphaZero、SPIN、Self-Rewarding LM | Constitutional AI、RLAIF |
+| **收敛信号** | Nash 均衡（对手学不动） | 无（人为停） |
+| **适用场景** | 博弈（围棋、辩论） | 对齐（helpful、harmless） |
+
+### 17.6.2 reward 信号的根本差异
+
+**Self-Play 的 reward 是内在的**——来自 agent 之间的对抗结果：
+
+- AlphaZero: reward = 胜负（game outcome）
+- SPIN: reward = $\sigma(f_\phi)$（分类器给 fake response 的分）
+- Self-Rewarding: reward = actor 自评
+
+**RLAIF 的 reward 是外在的**——来自一个独立的 AI judge：
+
+- CAI: reward = LLM judge 按 constitution 的评分
+- RLAIF: reward = LLM judge 给偏好对的判断
+
+### 17.6.3 适用场景
+
+| 场景 | 推荐 | 理由 |
+|---|---|---|
+| **围棋 / 棋类** | Self-Play | 有明确胜负，规则清晰 |
+| **辩论（debate）** | Self-Play | 两方对抗，judge 也是 LLM |
+| **数学推理** | 两者结合 | Self-Play 找新颖解，RLAIF 判对错 |
+| **对齐（helpful / harmless）** | **RLAIF** | 需要外部原则，self-play 没有明确胜负 |
+| **代码生成** | 两者结合 | Self-Play 探索，RLAIF 用 execution 反馈 |
+| **创意写作** | RLAIF | 需要审美判断（用 AI judge 模拟） |
+
+### 17.6.4 组合：Self-Play + RLAIF
+
+实际上两条路径可以组合：
+
+1. 用 **Self-Play** 生成大量多样的 response（探索）
+2. 用 **RLAIF**（AI judge）给 response 打分（评判）
+3. 用打分数据训 RM，做 RLHF/GRPO
+
+这是 **SPCAI**（Self-Play CAI）的思路——既不需要人类标注（self-play），
+又有明确 reward（AI judge）。
+
+### 17.6.5 可视化：Self-Play vs RLAIF 对比
+
+###%% CODE
+# 17.6.5 Self-Play vs RLAIF 对比图
+fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+ax = axes[0]
+ax.set_xlim(0, 10); ax.set_ylim(0, 8); ax.axis('off')
+ax.text(2.5, 6.5, 'Agent 1', ha='center', va='center',
+        fontsize=12, fontweight='bold', color='#1f77b4')
+ax.text(7.5, 6.5, 'Agent 2', ha='center', va='center',
+        fontsize=12, fontweight='bold', color='#ff7f0e')
+ax.text(5, 3.5, 'Game / Adversarial\nInteraction', ha='center', va='center',
+        fontsize=11, fontweight='bold', color='#2ca02c')
+ax.text(5, 0.8, 'Intrinsic Reward\n(win/lose)', ha='center', va='center',
+        fontsize=11, fontweight='bold', color='#d62728')
+
+arrow_kw = dict(arrowstyle='->', linewidth=2, color='black', alpha=0.7)
+ax.annotate('', xy=(4, 4.1), xytext=(3, 5.9), arrowprops=arrow_kw)
+ax.annotate('', xy=(6, 4.1), xytext=(7, 5.9), arrowprops=arrow_kw)
+ax.annotate('', xy=(5, 1.4), xytext=(5, 2.9), arrowprops=arrow_kw)
+ax.annotate('', xy=(2, 5.9), xytext=(4, 1.4),
+            arrowprops=dict(arrowstyle='->', linewidth=2, color='#1f77b4', alpha=0.5,
+                            connectionstyle='arc3,rad=-0.3'))
+ax.annotate('', xy=(8, 5.9), xytext=(6, 1.4),
+            arrowprops=dict(arrowstyle='->', linewidth=2, color='#ff7f0e', alpha=0.5,
+                            connectionstyle='arc3,rad=0.3'))
+ax.set_title('Self-Play\n(intrinsic reward, no external judge)',
+             fontsize=12, fontweight='bold')
+
+ax = axes[1]
+ax.set_xlim(0, 10); ax.set_ylim(0, 8); ax.axis('off')
+ax.text(2.5, 6.5, 'Actor', ha='center', va='center',
+        fontsize=12, fontweight='bold', color='#1f77b4')
+ax.text(7.5, 6.5, 'AI Judge', ha='center', va='center',
+        fontsize=12, fontweight='bold', color='#9467bd')
+ax.text(7.5, 3.5, 'Constitution\n(helpful / harmless / ...)',
+        ha='center', va='center', fontsize=10, fontweight='bold', color='#8c564b')
+ax.text(5, 0.8, 'Extrinsic Reward\n(AI judge score)', ha='center', va='center',
+        fontsize=11, fontweight='bold', color='#d62728')
+ax.annotate('', xy=(6.5, 6.5), xytext=(3.5, 6.5),
+            arrowprops=dict(arrowstyle='->', linewidth=2, color='black', alpha=0.7))
+ax.text(5, 6.8, 'response', fontsize=9, ha='center', style='italic')
+ax.annotate('', xy=(7.5, 4.1), xytext=(7.5, 5.9), arrowprops=arrow_kw)
+ax.text(8.2, 5, 'follows', fontsize=9, style='italic')
+ax.annotate('', xy=(5, 1.4), xytext=(6.5, 6.0),
+            arrowprops=dict(arrowstyle='->', linewidth=2, color='#d62728', alpha=0.7,
+                            connectionstyle='arc3,rad=0.3'))
+ax.annotate('', xy=(2.5, 5.9), xytext=(4, 1.4),
+            arrowprops=dict(arrowstyle='->', linewidth=2, color='#1f77b4', alpha=0.5,
+                            connectionstyle='arc3,rad=-0.3'))
+ax.set_title('RLAIF / Constitutional AI\n(extrinsic reward, AI judge)',
+             fontsize=12, fontweight='bold')
+
+plt.tight_layout(); plt.show()
+print('Self-Play: agent vs agent，reward 来自对抗结果（intrinsic）。')
+print('RLAIF: actor vs judge，reward 来自 AI judge 按 constitution 评（extrinsic）。')
+
+###%% MD
+## 17.7 小结 + Ch18 预告
+
+### 17.7.1 Ch17 核心收获
+
+| 概念 | 一句话总结 | 出处 |
+|---|---|---|
+| **RLHF bottleneck** | 人类标注贵、慢、有偏、难 scale | §17.1 |
+| **Self-Play** | agent 自己生成数据训自己（AlphaZero 范式） | §17.2 |
+| **棋类 vs LLM self-play** | 棋类有天然 reward（胜负），LLM 没有 | §17.2.3 |
+| **SPIN** | 分类器区分 real vs fake（GAN-style self-play） | §17.3 |
+| **Self-Rewarding LM** | LLM 自己给自己打分（Yuan 2024） | §17.3 |
+| **Constitutional AI** | 给 AI 一组原则（"宪法"），按原则自评 | §17.4 |
+| **RLAIF** | RLHF 的 reward 换成 AI judge | §17.4 |
+| **AI judge bias** | 长度偏好、自我偏好、位置偏好 | §17.4.5 |
+| **CAI pipeline** | SFT → AI preference pairs → RM → RL | §17.4.4 |
+
+### 17.7.2 关键公式速查
+
+| 公式 | 含义 | 出处 |
+|---|---|---|
+| $\max_\phi \mathbb{E}_{y \sim \pi_{human}}[\log \sigma(f_\phi)] + \mathbb{E}_{y \sim \pi_\theta}[\log(1-\sigma(f_\phi))]$ | SPIN 分类器目标 | §17.3.2 |
+| $r_{AI}(x, y; P_{judge})$ | AI judge 给的 reward | §17.4 |
+| $r_{AI}(x, y) = \sum_k w_k \cdot r_{AI}^{(k)}(x, y)$ | 多原则加权 reward | §17.4.2 |
+| $\mathcal{L}_{SPIN} = \text{softplus}(-f_{real}) + \text{softplus}(f_{fake})$ | SPIN loss（数值稳定） | §17.3.4 |
+
+### 17.7.3 与 Ch11-13 的关系（核心对比）
+
+| 维度 | Ch11 RLHF（人类标注） | Ch17 RLAIF（AI judge） |
+|---|---|---|
+| **数据来源** | 人类标注 pairwise | AI judge 生成 pairwise |
+| **成本** | ~$20/条 | ~$0.001/条（API 调用） |
+| **scale** | 难（标注者人数） | 易（GPU 扩展） |
+| **bias** | 标注者偏好 ≠ 用户偏好 | AI judge bias（长度 / 自我 / 位置） |
+| **RM 训练** | Bradley-Terry（同） | Bradley-Terry（同） |
+| **RL 训练** | PPO / GRPO（同） | PPO / GRPO（同） |
+| **唯一差异** | reward 来源 | reward 来源 |
+| **效果（Lee 2023）** | baseline | 与 RLHF 相当 |
+
+### 17.7.4 开放问题
+
+1. **AI judge bias 的系统性处理**：长度偏好、自我偏好目前只能靠启发式缓解
+   （长度惩罚、用异构 judge）。理论上更优的方法是什么？
+2. **Self-Play 在 LLM 上能否复制 AlphaZero 的成功？**
+   目前 SPIN / Self-Rewarding LM 在小规模有效，但还没看到 LLM self-play
+   "超越人类数据"的决定性证据。
+3. **Constitution 的来源**：constitution 本身是人类写的（还是有偏的）。
+   能不能用 AI 自动生成 constitution？这会引入什么新问题？
+4. **RLAIF 的 reward hacking**：AI judge 可能被"看起来好但实际差"的 response 骗
+   ——比人类标注更容易 hack。如何防御？
+5. **SPIN 的 Nash 均衡**：理论上 SPIN 收敛到 $\pi_\theta = \pi_{human}$，
+   实际中很难判断"是否收敛"——需要更好的停止准则。
+
+### 17.7.5 Ch15 §15.6.3 开放方向 2、3 的兑现
+
+> **方向 2**：self-play vs human data
+> **方向 3**：constitutional AI / RLAIF
+
+本章完整兑现：
+
+| 维度 | 体现 |
+|---|---|
+| **理论** | §17.1-17.4 完整对比 RLHF / Self-Play / RLAIF |
+| **代码** | `utils/self_play.py` 实现 `AIJudge`、`Constitution`、`spin_objective` |
+| **实验** | §17.5 在 TinyGPT 上跑通完整 RLAIF pipeline |
+| **测试** | `tests/test_self_play.py` 17 个冒烟测试 |
+| **结论** | RLAIF 流程可行；简化任务上接近 RLHF，真实场景效果见 Lee 2023 |
+
+### 17.7.6 Ch18 预告：Offline RL / Decision Transformer
+
+下一章（Ch18）将展开 **Ch15 §15.6.3 开放方向 4**：
+
+> **Offline RL / Decision Transformer**：从离线数据（不与环境交互）学 RL 策略。
+
+与本章的关系：
+
+- **本章（Self-Play + RLAIF）**：减少人类**标注**依赖
+- **Ch18（Offline RL）**：减少**在线交互**依赖
+
+两条路径都指向同一个目标：**让 RL 在真实场景中更实用**。
+
+Ch18 将介绍：
+
+- **Offline RL** 的核心难题：distribution shift（训练数据 ≠ 策略产生的数据）
+- **Conservative Q-Learning (CQL)**：对 OOD action 加惩罚
+- **Decision Transformer**：把 RL 重写成 sequence modeling
+- 与 Ch06 DQN、Ch09 PPO 的对比
+
+###%% CODE
+# Ch17 完成总结
+print('=' * 70)
+print('Ch17 Self-Play + Constitutional AI / RLAIF 完成')
+print('  (Phase 4 第二章，开放方向 2、3)')
+print('=' * 70)
+print('本章交付:')
+print('  - utils/self_play.py')
+print('      Constitution               (constitutional principles 容器)')
+print('      AIJudge                     (LLM judge: prompt+response -> scalar)')
+print('      generate_ai_preferences     (用 AI judge 生成偏好对)')
+print('      spin_objective              (SPIN 分类器目标, GAN-style)')
+print('      spin_iteration              (一轮 SPIN: 生成 fake + 训分类器)')
+print('      self_reward_score           (Self-Rewarding LM)')
+print('  - notebooks/ch17_self_play_cai.ipynb: 本章')
+print('  - tests/test_self_play.py: 17 个冒烟测试')
+print()
+print('模型参数量（在 TinyGPT 上验证 RLAIF 路线可行）:')
+print(f'  SPIN actor:        {count_parameters(spin_actor):>6,} params')
+print(f'  SPIN classifier:   {count_parameters(spin_clf):>6,} params')
+print(f'  arithmetic actor:  {ACTOR_PARAMS:>6,} params (SFT 后)')
+print(f'  RLAIF RM:          {RLAIF_RM_PARAMS:>6,} params (AI pairs trained)')
+print(f'  Human RM:          {HUMAN_RM_PARAMS:>6,} params (rule pairs trained)')
+print(f'  AIJudge (shared):  {JUDGE_PARAMS_SHARED:>6,} params (judge head)')
+print()
+print(f'SPIN 实验 ({SPIN_ITERS} iters):')
+print(f'  SPIN classifier: real_acc -> {spin_history[-1]["real_acc"]:.2f}, '
+      f'fake_acc -> {spin_history[-1]["fake_acc"]:.2f}')
+print(f'  (本简化 demo 上 classifier 区分度有限，真实 SPIN 论文有显著区分)')
+print()
+print(f'RLAIF pipeline 实验:')
+print(f'  AI 偏好对生成: {len(ai_pairs)} 对 (耗时 {rlaif_data_time:.1f}s)')
+print(f'  RLAIF RM 训练: {RLAIF_RM_ITERS} iters, final acc = {rlaif_rm_acc[-1]:.3f}')
+print(f'  Human RM 训练: {HUMAN_RM_ITERS} iters, final acc = {human_rm_acc[-1]:.3f}')
+print(f'  Human-GRPO ({GRPO_ITERS} iters): final_acc = {human_eval["final_acc"]:.2%} '
+      f'(delta={human_eval["final_acc"] - sft_baseline["final_acc"]:+.2%})')
+print(f'  RLAIF-GRPO ({GRPO_ITERS} iters): final_acc = {rlaif_eval["final_acc"]:.2%} '
+      f'(delta={rlaif_eval["final_acc"] - sft_baseline["final_acc"]:+.2%})')
+print()
+print(f'总耗时（notebook）:')
+print(f'  SPIN (3.4):        {spin_time:>6.1f}s')
+print(f'  RLAIF RM:          {rlaif_rm_time:>6.1f}s')
+print(f'  Human RM:          {human_rm_time:>6.1f}s')
+print(f'  Human-GRPO:        {human_grpo_time:>6.1f}s')
+print(f'  RLAIF-GRPO:        {rlaif_grpo_time:>6.1f}s')
+print()
+print('=' * 70)
+print('Phase 4 路线:')
+print('=' * 70)
+print('Phase 1 (Ch00-05): RL 基础（bandit, MDP, TD, Q-learning）')
+print('Phase 2 (Ch06-09): Deep RL（DQN, PG, AC, PPO）')
+print('Phase 3 (Ch10-15): LLM + RLHF + GRPO（完整 RLHF pipeline）')
+print('Phase 4 (Ch16-?) : 研究前沿（Ch15 §15.6.3 开放方向逐个展开）')
+print('  Ch16: PRM (开放方向 5)              <- OpenAI o1 核心')
+print('  Ch17: Self-Play + CAI / RLAIF (开放方向 2, 3)  <- 本章')
+print('  Ch18?: Offline RL / Decision Transformer (开放方向 4)')
+print('  Ch19?: World Models (开放方向 ?)')
+print('  Ch20?: Multi-agent / Debate (开放方向 6, 7)')
+print()
+print('Ch11 -> Ch13 -> Ch17 进化路径（RLHF -> GRPO -> RLAIF）:')
+print('  Ch11: RewardModel (人类标注 pairwise preference)')
+print('  Ch13: GRPO (group baseline, no critic)')
+print('  Ch17: RLAIF (reward 换成 AI judge) <- 本章')
+print()
+print('与 Ch11 RLHF 的核心对比:')
+print('  Ch11 RLHF:  reward = 训出的 RM（数据: 人类标注偏好对）')
+print('  Ch17 RLAIF: reward = 训出的 RM（数据: AI judge 生成的偏好对）')
+print('  pipeline 完全相同，唯一差异是 reward signal 的来源。')

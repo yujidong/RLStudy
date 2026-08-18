@@ -1,0 +1,88 @@
+The sun rises in the east.
+The sun sets in the west.
+The moon rises in the night.
+The moon sets in the dawn.
+The stars shine in the dark.
+The stars fade in the light.
+The wind blows through the trees.
+The wind calms in the morning.
+The rain falls on the roof.
+The rain stops in the evening.
+
+A knight rode into the hall.
+The king sat on his throne.
+The queen spoke to the knight.
+The knight bowed to the king.
+The dragon slept in the cave.
+The hero drew his bright sword.
+The dragon woke with a roar.
+The hero fought the dark dragon.
+The king gave the hero a crown.
+The realm lived in peace once more.
+
+Q: What is the color of the sky?
+A: The color of the sky is blue.
+Q: What is the color of the sun?
+A: The color of the sun is yellow.
+Q: What is the color of the grass?
+A: The color of the grass is green.
+Q: What is the color of the night?
+A: The color of the night is black.
+Q: What is the color of the snow?
+A: The color of the snow is white.
+Q: What is the color of the blood?
+A: The color of the blood is red.
+
+Q: How many legs does a cat have?
+A: A cat has four legs.
+Q: How many legs does a spider have?
+A: A spider has eight legs.
+Q: How many legs does a bird have?
+A: A bird has two legs.
+Q: How many wings does a bird have?
+A: A bird has two wings.
+Q: How many eyes does a human have?
+A: A human has two eyes.
+
+The little cat ran after the mouse.
+The little dog barked at the moon.
+The little bird sang in the tree.
+The little fish swam in the brook.
+The little boy played in the field.
+The little girl read by the fire.
+
+One and one make two.
+One and two make three.
+Two and two make four.
+Two and three make five.
+Three and three make six.
+Three and four make seven.
+Four and four make eight.
+Four and five make nine.
+
+1 plus 1 is 2.
+1 plus 2 is 3.
+2 plus 2 is 4.
+2 plus 3 is 5.
+3 plus 3 is 6.
+3 plus 4 is 7.
+4 plus 4 is 8.
+5 plus 5 is 10.
+6 plus 6 is 12.
+7 plus 7 is 14.
+8 plus 8 is 16.
+9 plus 9 is 18.
+
+To be or not to be, that is the question.
+The course of true love never did run smooth.
+All that glitters is not gold.
+A rose by any other name would smell as sweet.
+The fault, dear friend, is in ourselves.
+Some are born great, some achieve greatness.
+
+Hello, my name is Tiny.
+Hello, my name is GPT.
+Hello, my name is Sam.
+Hello, how are you today?
+Hello, the weather is fine.
+Hello, I love deep learning.

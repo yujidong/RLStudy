@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+.pytest_cache/
+.benchmarks/
+.ipynb_checkpoints/
+
+# Virtual env
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Generated artifacts
+assets/figures/*.gif
+assets/figures/*.mp4
+assets/figures/*.png
+assets/checkpoints/*.pt
+assets/checkpoints/*.pth
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,22 @@
+# 强化学习系统学习教材 - 依赖列表 (Phase 1)
+# Python >= 3.10 推荐
+
+# ---- 数值与可视化 ----
+numpy>=2.0
+scipy>=1.11
+matplotlib>=3.7
+
+# ---- Jupyter 交互 ----
+jupyter>=1.0
+ipywidgets>=8.1
+ipympl>=0.9          # %matplotlib widget 后端，notebook 内交互绘图
+
+# ---- 深度学习（Phase 2 起）----
+torch>=2.0
+
+# ---- 工具 ----
+tqdm>=4.66
+pytest>=8.0
+
+# ---- 以下为 Phase 3 (LLM RLHF) 可选依赖，本次安装可注释掉 ----
+# transformers>=4.40
