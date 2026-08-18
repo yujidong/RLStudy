@@ -1,0 +1,22 @@
+[project]
+name = "rlstudy"
+version = "1.0.0"
+description = "20 章强化学习交互式教材：零基础到能用 PPO / GRPO 训练 LLM"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "For personal study use" }
+dependencies = [
+    "numpy>=2.0",
+    "scipy>=1.11",
+    "matplotlib>=3.7",
+    "jupyter>=1.0",
+    "ipywidgets>=8.1",
+    "ipympl>=0.9",
+    "torch>=2.0",
+    "tqdm>=4.66",
+    "pytest>=8.0",
+]
+
+# 注：torch 默认源是 CUDA 大包（2GB+）。学生机/纯 CPU 机器建议先执行
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+# （setup_windows.bat / setup-mac-linux.sh 已自动这样做了）。

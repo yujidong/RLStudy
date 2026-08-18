@@ -18,6 +18,7 @@ env/
 *.swp
 
 # Generated artifacts
+doctor_report.txt
 assets/figures/*.gif
 assets/figures/*.mp4
 assets/figures/*.png

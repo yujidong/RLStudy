@@ -65,6 +65,9 @@ Phase 4：研究前沿 (Ch16-18)             <-- 全部已交付
 
 ## 安装与使用
 
+> **学生请直接看 [GETTING_STARTED.md](GETTING_STARTED.md)**（三步走 + 常见问题表）；
+> 老师查看 `doctor.py`（环境体检，产出可回传的诊断报告）与 `setup_windows.bat` / `setup-mac-linux.sh`（一键配置）。
+
 ### 1. 安装依赖
 
 ```bash
