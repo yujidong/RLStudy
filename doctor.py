@@ -46,7 +46,7 @@ def fail(msg: str, fix: str) -> None:
 def check_import(name: str, fix: str | None = None) -> str | None:
     try:
         mod = __import__(name)
-        ver = getattr(mod, "__version__", "?")
+        ver = getattr(mod, "__version__", "") or "（已安装）"
         ok(f"{name} {ver}")
         return ver
     except Exception as e:  # ImportError 或损坏安装的其它异常
@@ -69,6 +69,14 @@ if sys.version_info >= (3, 10):
 else:
     fail(f"Python {sys.version_info[:3]} 版本过低（需要 ≥ 3.10）",
          "到 python.org 下载 Python 3.10+，或用 setup_windows.bat / setup-mac-linux.sh 重建环境")
+
+# 提醒：.venv 存在但当前不是它 → 学生忘了激活
+if (Path(__file__).parent / ".venv").exists() and sys.base_prefix == sys.prefix:
+    log()
+    log("    [!] 注意：项目里已有 .venv 虚拟环境，但当前解释器不是它——")
+    log(r"        Windows 先执行  .venv\Scripts\activate   再跑 python doctor.py")
+    log("        macOS/Linux 先执行  source .venv/bin/activate")
+    log("        （或者直接用 start_windows.bat / 一键脚本，它们会自动激活）")
 
 # ---------------------------------------------------------------- 2. 核心依赖
 log()

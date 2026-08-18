@@ -41,11 +41,16 @@ bash setup-mac-linux.sh
 
 | 症状 | 原因与解法 |
 |---|---|
+| 双击 .bat 弹出蓝色警告「Windows 已保护你的电脑」 | SmartScreen 拦截：点「更多信息 → 仍要运行」。被杀毒软件拦的话，把 RLStudy 文件夹加入信任区 |
 | 提示「没找到 Python」 | 没 装 Python 或没加 PATH：到 [python.org](https://www.python.org/downloads/) 装 3.10+，**第一屏勾选 "Add Python to PATH"**，重跑脚本 |
-| Python 版本低于 3.10 | 装 3.10+；若系统里有多个版本，Windows 用 `py -3.12 -m venv .venv` 手动建环境 |
-| PyTorch 下载特别慢 | torch 走的是官方源确实较慢，挂上校园网/热点耐心等；实在不行先跳过（前五章纯 numpy 不需要它），后面单独执行 `pip install torch --index-url https://download.pytorch.org/whl/cpu` |
+| 装了 Python 仍提示找不到 | Microsoft Store 假别名在捣乱：「设置 → 应用 → 高级应用设置 → 应用执行别名」，关掉 python.exe / python3.exe 两项后重跑 |
+| Python 版本低于 3.10 | 装 3.10+；Windows 装完后 `py -3` 会自动优先用新版本，删掉旧 `.venv` 重跑 setup |
+| PyTorch 下载特别慢 | torch 走的是官方源确实较慢，挂上校园网/热点耐心等；脚本检测到失败会自动跳过（前五章纯 numpy 不需要它），之后单独执行 `pip install torch --index-url https://download.pytorch.org/whl/cpu` |
 | 其它包下载慢 | 可用国内镜像：`pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple` |
 | 公司/校园代理拦下载 | `pip install --proxy http://代理地址:端口 ...`，或换手机热点 |
+| pip 莫名报错找不到包 | 可能是下载被代理劫持出错了半截缓存：`pip cache purge` 后重试 |
+| 用户名是中文导致一堆奇怪报错 | 把项目文件夹挪到 `C:\RLStudy` 这类纯英文路径下重来 |
+| setup 跑到一半中断 / .venv 损坏 | 直接删掉 `.venv` 文件夹，重跑 setup 脚本（重来一遍即可，无残留） |
 | 体检有 ✗ | 按 ✗ 旁边的「修复建议」处理；不行就发 `doctor_report.txt` 给老师 |
 | notebook 里图不显示 / NameError | 九成是 cell 没按顺序跑：**Restart Kernel and Run All Cells** 一次 |
 | 电脑实在带不动 / 不想装环境 | 找老师开云端方案（GitHub Codespaces：仓库页绿色 Code 按钮 → Codespaces） |
