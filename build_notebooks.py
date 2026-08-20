@@ -130,6 +130,10 @@ def ch14() -> List[Cell]:
     """Ch14 DPO / KTO（来自 build_ch14.py）。"""
     return _cells_from_module_dict("build_ch14")
 
+def ch19() -> List[Cell]:
+    """Ch19 Agentic RL（来自 build_ch19.py）。"""
+    return _cells_from_module_dict("build_ch19")
+
 
 # Ch15 没有 build_ch15.py（capstone 项目，手维护）。
 # 它的 notebook notebooks/ch15_capstone.ipynb 由人工维护，本脚本不重建。
@@ -487,7 +491,7 @@ HTML(anim.to_jshtml())
 > 最后抵达这条路的终点——把「生成一个 token」变成「做一个决策」，
 > 用强化学习微调一个语言模型。这就是从 Ch01 到 Ch13 的全部故事线。
 
-我们用 4 个 Phase（共 19 章）带你从零基础到能用 PPO / GRPO 训练 LLM、再到研究前沿：
+我们用 5 个 Phase（共 20 章）带你从零基础到能用 PPO / GRPO 训练 LLM、再到研究前沿与 Agentic RL：
 
 ```
 Phase 1：经典 RL 基础（你现在在这里）
@@ -517,6 +521,9 @@ Phase 4：研究前沿
 ├── Ch16 PRM（过程奖励模型）
 ├── Ch17 Self-Play + Constitutional AI / RLAIF
 └── Ch18 Offline RL（CQL / IQL / Decision Transformer）
+
+Phase 5：通往 Agentic RL（新兴方向）
+└── Ch19 Agentic RL：工具调用 + 多轮交互 + RAFT（呼应 Ch00 的 agent loop）
 ```
 
 ### 🏁 Fast-track 路径（如果你赶时间）
@@ -3424,6 +3431,7 @@ NOTEBOOK_BUILDERS = [
     ("ch12_rlhf_ppo.ipynb",                     ch12),
     ("ch13_grpo.ipynb",                         ch13),
     ("ch14_dpo_kto.ipynb",                      ch14),
+    ("ch19_agentic_rl.ipynb",                   ch19),
     # Ch15-18: 手维护/独立脚本，不在此自动重建（见文件头注释）
     # Ch15: capstone 项目
     # Ch16: PRM（utils/prm.py + 手维护 notebook）
@@ -3438,6 +3446,7 @@ _CHAPTER_INDEX = {
     "05b": ch05b,
     "06": ch06, "07": ch07, "08": ch08, "09": ch09,
     "10": ch10, "11": ch11, "12": ch12, "13": ch13, "14": ch14,
+    "19": ch19,
 }
 
 

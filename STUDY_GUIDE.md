@@ -18,6 +18,7 @@
 | 2 策略梯度 + PPO | Ch06 → 09 | 12-18 小时 |
 | 3 LLM RLHF + GRPO | Ch10 → 15 | 15-20 小时 |
 | 4 研究前沿 | Ch16 → 18 | 8-12 小时 |
+| 5 Agentic RL | Ch19 | 2-3 小时 |
 
 - **零基础**：按顺序走，别跳。
 - **有 RL 基础赶时间**：Fast-track `Ch00 → 01 → 05 → (05b) → 07 → 09 → 13`，约 20 小时直达 GRPO。
@@ -491,6 +492,36 @@ return-to-go R̂_t（从 t 到回合结束的实际累计奖励）：把 (R̂_t,
 <details><summary>答案</summary>
 
 τ→1 时 asymmetric loss 只惩罚低估，估计量趋向条件**最大值** max_a Q(s,a)（数据分布内）——IQL 用一个连续的旋钮从"平均值"(τ=0.5) 平滑过渡到"近似 max"，绕开了显式 max 的 OOD 问题。
+</details>
+
+---
+
+## Phase 5
+
+### Ch19 Agentic RL（工具调用 + 多轮交互）
+
+1. Agent loop 和 RL loop 的对应关系是什么？多轮 setting 下，state 里多了什么？
+<details><summary>答案</summary>
+
+观察（用户消息/工具返回）= 状态，动作 = 生成的 token（或一次工具调用），环境 = 搜索/计算器/沙盒，奖励 = 任务结局。多轮下 state 包含**工具注入的观察**——上下文随交互增长，且环境注入的 token 属于观察（state），**不算进 log π**（不是模型的动作）——这是 Agentic GRPO 最容易踩的坑。
+</details>
+
+2. Ch13 的 GRPOTrainer 为什么不能直接用于多轮 agent 训练？
+<details><summary>答案</summary>
+
+rollout 是"一口气采样 prompt→response"；多轮需要**交互循环**：模型段 ⇄ 环境段穿插（`decode_with_tools` 的结构）。log π 只累计模型 emit 的 token；advantage/clip/KL 部分原封不动。
+</details>
+
+3. RAFT 和 GRPO 的本质区别是什么？RAFT 什么条件下有效？
+<details><summary>答案</summary>
+
+RAFT = 把 group advantage 二值化（正确 1 / 错误 0）后做 SFT——丢掉"差多少"的信息和负样本梯度。有效条件：SFT 平均水平远低于 oracle best-of-K、且模型还有泛化余量（推理链类任务）；在模型已背熟训练集、贴着泛化天花板时会失效甚至倒退（Ch19 的玩具如实演示了这一点）。
+</details>
+
+4. 为什么「同一个模型 + 计算器工具」能赢「同一个模型裸算」？这对真实 LLM 意味着什么？
+<details><summary>答案</summary>
+
+网络只需学会抄写操作数、转写工具结果——序列模型的本行；而裸算要把进位加法压进参数——容量的硬功夫。工具是**能力边界的扩展**而非接口：o3/R1 的搜索-推理-回溯是同一原理的工业版。多数投票治随机错不治系统错、oracle best-of-K 是 RL 的理论收益上限——这两个仪表盘读数是 agent 工程的常识。
 </details>
 
 ---
