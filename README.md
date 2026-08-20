@@ -148,6 +148,7 @@ jupyter lab notebooks/
 RLStudy/
 ├── README.md                       # 本文件
 ├── STUDY_GUIDE.md                  # 学习指南：全章自测题（答案可折叠）+ Phase 门槛 + 时间预估
+├── WRITING_STYLE.md                # 写作风格指南：教材的叙事与交互设计规范（改内容前必读）
 ├── requirements.txt
 ├── build_notebooks.py              # 总入口：重建注册的 15 个 notebook（ch00-14）+ 5 个 solutions
 │                                   #   python build_notebooks.py             # 全部
