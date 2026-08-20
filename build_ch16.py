@@ -885,7 +885,15 @@ cells.append(md("""### 16.4.7 对比实验：ORM Best-of-N vs PRM Best-of-N
 - ORM Best-of-N：用 `orm_best_of_n`
 - PRM Best-of-N：用 `prm_best_of_n`
 
-对比两个方法的 **final accuracy**（最终两步都对）。"""))
+对比两个方法的 **final accuracy**（最终两步都对）。
+
+> 🤔 **先猜再跑**：先下注再开跑。我们的任务只有两步推理——预测 PRM 相对 ORM 的优势是大、小、还是几乎看不出？再预测一个趋势：**N 从 1 加到 16**，两者的 accuracy 曲线大致什么形状（线性涨？边际递减？先快后平台）？
+>
+> <details><summary>写下两个预测再点开</summary>
+>
+> 提示：PRM 的优势来自"每一步都打分"——推理链越长，中间出错的机会越多，PRM 精细定位的价值越大。我们只有两步：链太短，ORM 的"最终答案"信号几乎够用，所以**优势预期很小**。真实场景（GSM8K 的多步 CoT、MATH）里 Lightman et al. 2023 实测 N=100 时 PRM 比 ORM 高约 10 个百分点——那是 PRM 的主场。两步任务是我们的"示波器"，不是 PRM 的战场。
+> </details>
+"""))
 
 cells.append(code("""# 16.4.7 ORM vs PRM Best-of-N 对比
 torch.manual_seed(42)

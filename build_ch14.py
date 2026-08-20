@@ -1022,6 +1022,13 @@ md(r"""## 14.5 三方对比：DPO vs GRPO vs PPO-RLHF
 > **公平性 note**：3 个算法的超参都各自调过；toy 模型很小，结论是**定性**的
 > （哪个提升快、哪个更稳）而非定量（具体 reward 数值依赖 RM scale）。
 
+> 🤔 **先猜再跑**：竞技场开赛前下个注。三个候选——PPO-RLHF（4 模型全家桶）、GRPO（3 模型）、DPO（2 模型、无 rollout）。预测：(1) 谁的 reward 提升**最快**？(2) 谁的 **wall-clock** 最省？(3) 会有哪个算法"明明赢了 reward 却输了别的东西"吗？
+>
+> <details><summary>写下三个答案再点开</summary>
+>
+> 常见误判是"DPO 便宜所以全面更优"。真实的 trade-off：DPO 快、稳、省（静态数据反复用），但它**见不到自己生成的样本**——训练分布和推理分布会漂移（§14.5.2 的 distribution shift，这是它的根本局限）；RL 系算法贵，却因为不断 rollout 而"知道现在的自己长什么样"。没有银弹，只有场景匹配：算力紧 / 数据多 → DPO；要在线探索 / 任务有可验证 reward → GRPO。Llama 3、Zephyr 等开源模型正是用 DPO 做对齐的主力。
+> </details>
+
 ### 14.5.2 Distribution shift：DPO 的根本局限
 
 DPO 在**静态偏好数据**上训，actor 从来不"看见"自己生成的 response。

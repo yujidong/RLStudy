@@ -494,7 +494,15 @@ $$\hat A_i^{\text{GRPO}} = \frac{r_i - \bar r}{\sigma_r + \epsilon}$$
 
 下面用合成实验验证 "$\bar r$ 是 $V^\pi(x)$ 的无偏估计" 这个引理。
 我们用一个已知 reward 函数 $r(x, y) = $ `true_reward`（Ch11），
-固定 prompt，采不同 $G$ 看 $\bar r$ 如何收敛到 $\mathbb{E}_y[r(x, y)]$。""")
+固定 prompt，采不同 $G$ 看 $\bar r$ 如何收敛到 $\mathbb{E}_y[r(x, y)]$。
+
+> 🤔 **先猜再跑**：group 均值 r̄ 是靠采 G 个样本估出来的。预测两条线的形状：(1) r̄ 对 G 的曲线——误差随 G 怎么衰减（1/G？1/√G？指数？）；(2) 实验会重复 200 次取误差的**平均和标准差**——误差带（阴影）的宽度随 G 怎么变？
+>
+> <details><summary>写下两条曲线再点开</summary>
+>
+> 这是 Ch04 §4.5 老朋友的回归：蒙特卡洛估计的标准误差 ∝ 1/√G——G 从 4 到 16 到 64，误差带每次**缩一半**。含义很实在：想 advantage 的基线噪声减半，采样预算要翻 4 倍。这就是练习 1（group_size 扫描）里"G=2 太噪"的定量根源。
+> </details>
+""")
 
 code(r"""# 13.3.8 toy 验证：G 增大时 r̄ -> E[r]（无偏 MC 估计）
 # 用 Ch11 的 true_reward（合成 ground truth）模拟 V^π(x) = E_y[r(x,y)]

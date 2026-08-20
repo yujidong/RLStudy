@@ -39,7 +39,9 @@ Ch05 的 Q-learning 已经是完整的无模型控制算法（§5.3 off-policy�
 - **Double DQN**：Ch05 §5.8 的解耦思想在 Deep RL 里的版本
 - **致命三件套（Deadly Triad）**：函数逼近 + 自举 + off-policy 同时出现的发散风险
 
-本章逐一给出解法。""")
+本章逐一给出解法。
+
+> 🌍 **真实世界**：DQN 不是玩具——DeepMind 2015 年发表在 Nature 上的版本，用**同一个网络、同一套超参数**打通了 49 款 Atari 游戏（输入就是原始像素），其中 29 款超过人类专业玩家水平。它是"深度学习 × 强化学习"的第一次正面成功，此后所有 deep RL（包括你要在 Phase 3 学的 RLHF）都站在它的肩膀上。""")
 
 code("""# 常规设置：找项目根、载入库
 import sys, pathlib
@@ -345,7 +347,15 @@ Deep RL 训练不稳定的根源是三个东西同时出现：
 
 ### 6.4.3 数值演示：训练不稳定的 DQN
 
-让我们做个反面实验：去掉 target network、去掉 replay buffer，看 DQN 是否真的会发散。""")
+让我们做个反面实验：去掉 target network、去掉 replay buffer，看 DQN 是否真的会发散。
+
+> 🤔 **先猜再跑**：这个"裸奔版 DQN"会怎样？三个选项——(A) 照样学会，只是慢一点；(B) 完全不学，分数停在随机水平；(C) 先学一会儿，然后**崩掉**，甚至比随机还差。写下你的选择再跑。
+>
+> <details><summary>选完再点开</summary>
+>
+> 提示：回想上面的正反馈环——θ 更新 → target 跟着动 → 误差被进一步放大。如果只是"学得慢"，说明环没转起来；要警惕的是**先升后崩**的曲线形状。这正是当年研究者盯着训练曲线百思不解的现象——直到 replay buffer 和 target network 这两个"刹车"被发明出来。
+> </details>
+""")
 
 code("""# 反面实验：naive DQN（无 target net、无 replay），看是否真的发散
 import copy

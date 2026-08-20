@@ -849,6 +849,13 @@ KL penalty 强制 policy 不要离 $\pi_{\text{ref}}$ 太远——防止 agent �
   同时引入随机扰动（模拟策略漂移）。
 - 观察 proxy reward（涨）vs true reward（先涨后降）。
 
+> 🤔 **先猜再跑**：想象你放开手脚去优化这个不完美的 RM——预测**两条曲线**的形状：(1) proxy reward（RM 自己打的分）随优化步数怎么走？(2) true reward（真实人类偏好）呢——一路跟着涨，还是先涨后跌，还是一开始就不涨？
+>
+> <details><summary>画完两条想象中的曲线再点开</summary>
+>
+> 经典剧本：proxy 一路狂涨（你确实在最大化它）；true 先涨（RM 大方向没错，顺便把真质量也带上去）后**拐头下跌**（agent 开始钻 RM 的空子——那些"RM 觉得好、人觉得差"的 response）。拐点出现的位置，就是 KL penalty 该介入的位置——记住这个图，Ch12 的 β 调参全在治它。
+> </details>
+
 为了清晰展示 "true 先涨后降"，我们故意**注入过拟合噪声**到 RM——
 让 RM 在某些 response 上"过度自信"，agent 优化它就会偏离 $r^*$。""")
 
