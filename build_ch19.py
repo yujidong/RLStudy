@@ -13,7 +13,7 @@ md, code = _nb.md, _nb.code
 # =============================================================================
 # Title
 # =============================================================================
-md(r"""# 第 19 章：Agentic RL —— 把强化学习用到 Agent 上
+md(r"""# 第 19 章：Agent 基础 —— 让 LLM 学会使用工具
 
 Ch13 结束时你可能有一个隐约的疑问：我们训练的 GRPO，每次都是「一问一答」——prompt 进、response 出、打分、更新。可真正的 agent 不是这样工作的：它会**连续行动多轮**，中间调用搜索、代码、计算器这些工具，看到工具返回的观察再决定下一步。**动作改变世界，世界反馈信息**——这个描述你在哪见过？Ch00 的第一页：ClickWorld 的 agent-environment loop。
 
@@ -23,8 +23,10 @@ Ch13 结束时你可能有一个隐约的疑问：我们训练的 GRPO，每次�
 
 1. 实现一个**带计算器工具的多轮解码循环**（工具结果注入生成上下文——和真实 agent 完全同构）
 2. 对比实验：**同一个模型，无工具 vs 有工具**，看能力差距从哪来
-3. 亲手跑一轮 **RAFT**（采样-过滤-再训练）：不写一行 RL 代码的「穷人版强化学习」
-4. 把 GRPO 从单轮升级到多轮需要改什么（结构级讨论 + 伪代码 + 真实论文地图）
+3. 量化**推理时余量**：best-of-N、多数投票——agent 评估的标准仪表盘
+4. 亲手跑一轮 **RAFT**（采样-过滤-再训练）：不写一行 RL 代码的「穷人版强化学习」，并**如实观察它的能力边界**
+
+下一章（Ch20）再把真正的 GRPO 搬进这个多轮世界、跑通它、并看看它能吃到多少 RAFT 吃不到的余量。
 
 > 前置：Ch10（TinyGPT）、Ch13（GRPO）建议已完成；Ch16（PRM）有助于理解过程奖励部分。
 
@@ -34,7 +36,7 @@ Ch13 结束时你可能有一个隐约的疑问：我们训练的 GRPO，每次�
 2. 实现**工具增强解码**：模型生成中穿插环境注入的观察
 3. 用实验理解「工具 = 能力外置」：为什么小模型 + 工具能赢大模型裸算
 4. 跑通 **RAFT**（rejection sampling + SFT），理解它是 GRPO 的一步近似
-5. 掌握 Agentic GRPO 相对 Ch13 的**三个结构性变化**和四大挑战
+5. 掌握 agent 评估的五量仪表盘（greedy / 投票 / oracle BoN / RAFT 前后），知道**先量天花板再选工具**
 """)
 
 code(r"""# 常规设置：找项目根、载入库
@@ -427,87 +429,39 @@ md(r"""### 读结果：这次实验教会我们「先量天花板，再选工具
 
 > 🌍 **真实世界**：这一节的五个量就是 agent 评估的标准仪表盘——单次性能（便宜）、多数投票（多花 k 倍推理费买稳定）、oracle best-of-k（RL 的理论收益上限）、以及「RL 之后单次性能涨了多少」（把推理费一次性折旧成权重）。**先量 oracle best-of-k，再决定要不要上 RL**——这个工程直觉值回本章票价。
 
-最后一块拼图：RAFT 的二值化过滤丢掉了「差多少」的信息。**用 group advantage 连续加权、且天生适配多轮轨迹**的，正是你已经学过的 GRPO——下一节把它搬进 agent 世界。
+最后一块拼图：RAFT 的二值化过滤丢掉了「差多少」的信息。**用 group advantage 连续加权、且天生适配多轮轨迹**的，正是你已经学过的 GRPO——**下一章（Ch20）我们把它搬进 agent 世界并真正跑起来**，亲眼看看它能吃到多少这份余量。
 """)
 
-md(r"""## 19.5 Agentic GRPO：从单轮到多轮，改哪三处
+md(r"""## 19.5 小结
 
-有了上面的玩具，现在能精确说出 Ch13 的 GRPO 要搬到 agent 世界需要改什么了。**目标函数一个字不用改**（group advantage、clip、KL penalty 原样保留），改的是**rollout 的发生方式**：
-
-| | Ch13 单轮 GRPO | Agentic GRPO（多轮） |
-|---|---|---|
-| 轨迹 | 一次采样 prompt→response | **交互循环**：模型段 ⇄ 环境段（§19.2 的 `decode_with_tools` 就是雏形） |
-| 状态 | prompt 固定 | 每轮包含**工具返回的观察**（上下文随交互增长） |
-| 奖励 | RM 打分（或规则） | 通常是**任务结局**（答案对/错、测试通过/失败），更稀疏 |
-| log π 的计算 | 对 response token 求和 | 只对**模型 emit 的 token** 求和——**环境注入的 token 不算**（不是模型的动作！） |
-
-最后一点是唯一容易踩的坑：工具返回的 token 属于**观察**（state 的一部分），如果把它们的 log-prob 也算进 π 的分子，策略梯度就错了。伪代码：
-
-```python
-for prompt x in batch:                    # 每个任务
-    for i in range(G):                    # 组内 G 条轨迹
-        traj, logp = [], []
-        while not done:
-            tok_ids = model.sample(...)   # 模型段：emit token（计入 logp）
-            obs = env.step(tok_ids)       # 环境段：工具观察（不计入 logp）
-        r_i = task_reward(traj)           # 结局奖励（稀疏）
-    A_i = (r - mean(r)) / (std + eps)     # ← Ch13 原封不动
-loss = ppo_clip(logp, A_i) + kl_penalty   # ← Ch13 原封不动
-```
-
-**四大挑战**（每一条都是 2024-2025 的活跃论文方向）：
-
-1. **长视野信用分配**——10 轮工具调用前的那次搜索，对最终答对有多大功劳？GAE over turns、PRM（Ch16）都是候选答案
-2. **奖励稀疏 + 可作弊**——结局奖励太粗，过程奖励又容易被 hack（Ch11 的 Goodhart 在这里复发）
-3. **rollout 昂贵**——一条轨迹 = 多次 LLM 推理 + 多次工具调用；训练吞吐被环境卡住
-4. **环境不可复现/不可仿真**——真实搜索引擎每次结果不同，同一个动作两次奖励不同，方差暴涨
-""")
-
-md(r"""## 19.6 真实世界与前沿地图
-
-> 🌍 **这个方向的名字就叫 Agentic RL**。几个值得认识的坐标（按与我们玩具的关系排）：
->
-> - **ReAct**（Yao et al. 2022）——Thought-Action-Observation 循环的开山，我们的 `?expr=结果` 就是它的最小化身；原工作用 prompting 实现，**不学习**
-> - **STaR / RAFT**（Zelikman 2022; Dong et al. 2023）——§19.4 的方法本体：采样、过滤、再训练
-> - **Search-R1**（Jin et al. 2025）——把搜索引擎当工具、答案正确性当 reward、GRPO 做优化器的完整闭环；我们的玩具换掉工具就是这个工作的骨架
-> - **ToolRL / Tool-use RL**（2025 系列）——研究「什么时候调工具」本身作为学习目标：reward 里显式加入工具调用的时机奖惩
-> - **OpenAI o3 / DeepSeek-R1**——工业级推理 agent：长链工具调用 + 强化学习，公开报告都描述了「反思、回溯、自我纠错」行为的**涌现**（我们在 ch15 猜过的「先装死、后起飞」的大模型版）
->
-> 一个诚实的现状判断（也是你判断研究机会的依据）：**单轮 RLHF 的配方已经标准化（DPO/GRPO），而多轮 Agentic RL 的配方还在混战**——奖励怎么设计、过程奖励怎么防 hack、长视野 credit 怎么分，都还没有共识答案。这正是「刚刚开始」的含义：**入场的好时机**。
-
-## 19.7 小结
-
-> 从 Ch00 网格里「策略决定一切」的懵懂，到 Ch13 让模型学会「对的答案概率更高」，
-> 再到今天——模型伸出手，**拿起工具**，在多轮交互中自己试错、自己改进。
-> 你手里的小小计算器轨迹，和 o3 的搜索-推理-回溯循环，在结构上是同一个故事。
+> 模型伸出手，拿起工具——从「回答问题」到「在环境里行动」，
+> 跨出这一步的是工具增强解码；而「行动得越来越好」，是下一章 RL 的事。
 
 - ✅ Agent loop 与 RL loop 同构：观察=状态、工具调用=动作、任务结局=奖励
-- ✅ 工具增强解码 = 状态机 + 环境注入（观察进上下文，但不进 log π）
+- ✅ 工具增强解码 = 状态机 + 环境注入（观察进上下文，但不进 log π——下一章会用到这条）
 - ✅ 实验：同参数模型，工具版碾压直算版——工具是能力边界的扩展
-- ✅ RAFT = 权重二值化的 GRPO：从自己的成功中学习
-- ✅ Agentic GRPO 的三个结构变化 + 四大开放挑战
+- ✅ 五量仪表盘：greedy / 多数投票 / oracle best-of-k / RAFT 前后——**先量天花板，再选工具**
+- ✅ RAFT = 权重二值化的 GRPO：有效的三个前提（大答案空间、SFT 远低于采样上限、泛化有余量）
 
-## 19.8 📝 练习
+## 19.6 📝 练习
 
 ### 练习 1（必做）：把 RAFT 变成 iterative
 
-只跑了一轮 RAFT。把它改成 3 轮循环（每轮重新采样、过滤、再训练），画出每轮的测试正确率折线。预期：边际收益递减，最终停在「采样分布覆盖正确答案」的上限附近。
+只跑了一轮 RAFT。把它改成 3 轮循环（每轮重新采样、过滤、再训练），画出每轮的测试正确率折线，验证「在背熟的题集上加练只会继续过拟合」的判断。
 
 **提示**：每轮 `raft_collect` 用**当前**的 model_B；把 `eval_tool` 的结果存进 list。
 
 ### 练习 2（选做）：给工具调用加代价
 
-现实里工具不免费（延迟、配额）。改 `decode_with_tools`：每次工具调用记录一次计数；reward 改成「答案正确 − 0.1 × 工具次数」，重新跑 RAFT。观察模型会不会学会「简单的题直答、难的题才用工具」——这就是 ToolRL 论文的核心设定。
+现实里工具不免费（延迟、配额）。改 `decode_with_tools`：每次工具调用记录一次计数；reward 改成「答案正确 − 0.1 × 工具次数」，重新设计评估。观察模型有没有可能学会「简单的题直答、难的题才用工具」——这就是 ToolRL 论文的核心设定（Ch20 的练习会把它接到真 GRPO 上）。
 
 > 📖 做完练习后，去根目录 STUDY_GUIDE.md 做 Ch19 的自测题。
 
 ## 参考文献
 
-- Yao, S. et al. *ReAct: Synergizing Reasoning and Acting in Language Models* (2022)
+- Yao, S. et al. *ReAct: Synergizing Reasoning and Acting in Language Models* (2022)——Thought-Action-Observation 循环开山
 - Zelikman, E. et al. *STaR: Bootstrapping Reasoning With Reasoning* (2022)
 - Dong, G. et al. *RAFT: Reward rAnked FineTuning for Generative Foundation Model Alignment* (2023)
-- Jin, B. et al. *Search-R1: Training LLMs to Reason and Leverage Search Engines with Reinforcement Learning* (2025)
-- DeepSeek-AI. *DeepSeek-R1: Incentivizing Reasoning Capability via RL* (2025)
 """)
 
 

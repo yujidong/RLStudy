@@ -20,7 +20,7 @@ Phase 3：LLM RLHF + GRPO (Ch10-15)     <-- 全部已交付（终极目标）
     ↓
 Phase 4：研究前沿 (Ch16-18)             <-- 全部已交付
     ↓
-Phase 5：Agentic RL (Ch19)               <-- 已交付
+Phase 5：Agentic RL (Ch19-20)            <-- 已交付
 ```
 
 > **当前进度**：Phase 1-4 共 **19 章 / 157 个测试**已全部交付。仓库内任何一条路径都能直接跑通。
@@ -51,9 +51,10 @@ Phase 5：Agentic RL (Ch19)               <-- 已交付
 | **Ch16** | PRM (Process Reward Model) | step-level reward 热力图 + PRM vs ORM Best-of-N 对比 **（已交付）** |
 | **Ch17** | Self-Play + Constitutional AI | SPIN GAN 结构 + AI judge 评分分布 + RLAIF-GRPO vs Human-GRPO 对比 **（已交付）** |
 | **Ch18** | Offline RL (CQL/IQL/DT) | OOD Q 值发散对比 + expectile 数值演示 + DT return-conditioning 扫描 **（已交付）** |
-| **Ch19** | Agentic RL（工具调用 + 多轮） | 工具增强解码演示 + 无工具/有工具对比实验 + best-of-8/投票/RAFT 五量对比 **（已交付）** |
+| **Ch19** | Agent 基础：学会使用工具 | 工具增强解码演示 + 无工具/有工具对比实验 + best-of-8/投票/RAFT 五量仪表盘 **（已交付）** |
+| **Ch20** | **Agentic GRPO 实战（终章）** | 多轮 GRPO 真实现（log π 蒙版）+ 固定题集 vs 无限题海对照实验（85%→97.5%）+ 全书终章 **（已交付）** |
 
-> **项目完成度：100%（21 个 notebook / 157 测试，Phase 1-5 全部已交付）**
+> **项目完成度：100%（22 个 notebook / 157 测试，Phase 1-5 全部已交付）**
 
 > 📖 **配套学习指南**：`STUDY_GUIDE.md` —— 全部章节的自测题（答案可折叠）、
 > 三个 Phase 门槛自测、每章时间预估。**建议每学完一章就做对应自测，过关再前进。**
@@ -139,7 +140,8 @@ jupyter lab notebooks/
 - Lightman et al., *Let's Verify Step by Step*（2023）—— PRM，Ch16
 - Yao et al., *ReAct: Synergizing Reasoning and Acting in Language Models*（2022）—— Ch19
 - Zelikman et al., *STaR: Bootstrapping Reasoning With Reasoning*（2022）—— Ch19 RAFT
-- Jin et al., *Search-R1: Training LLMs to Reason and Leverage Search Engines with RL*（2025）—— Ch19
+- Jin et al., *Search-R1: Training LLMs to Reason and Leverage Search Engines with RL*（2025）—— Ch19/20
+- Qian et al., *ToolRL: Reward is All Tool Learning Needs*（2025）—— Ch20
 
 **Phase 3（Ch10-15）LLM + RLHF + GRPO**
 - Vaswani et al., *Attention Is All You Need* (2017) —— Transformer / self-attention，Ch10 灵魂等式
@@ -165,7 +167,7 @@ RLStudy/
 │                                   #   python build_notebooks.py --chapter 13     # 只 GRPO
 │                                   #   python build_notebooks.py --list
 │                                   #   ch15 手维护；ch16-18 用各自的 build_chXX.py 重建
-├── build_ch06.py ... build_ch19.py # 各章 notebook 内容定义（独立可跑、被 build_notebooks.py 调用；
+├── build_ch06.py ... build_ch20.py # 各章 notebook 内容定义（独立可跑、被 build_notebooks.py 调用；
 │                                   #   ch17/ch18 的内容在 ch17_content.txt / ch18_content.txt）
 ├── nb_helpers.py                   # 全部 build 脚本共享的构建工具（统一 cell helper / 写出 / metadata）
 ├── conftest.py + pytest.ini        # pytest 配置
@@ -173,7 +175,7 @@ RLStudy/
 │                                   #   GridWorld / CliffWalk / RandomWalk / MultiArmedBandit
 │                                   #   CartPoleLite (Phase 2) / TinyGPT (Phase 3)
 ├── utils/                          # 共享可视化与工具（set_seed / torch_utils / ...）
-├── notebooks/                      # 21 个 ipynb（ch00 ~ ch19 + ch05b PyTorch 速成）
+├── notebooks/                      # 22 个 ipynb（ch00 ~ ch20 + ch05b PyTorch 速成）
 ├── solutions/                      # 5 个练习参考答案 ipynb（ch01-thompson / ch02-bridge-γ / ...）
 ├── tests/                          # 14 个测试文件，共 157 个用例
 │                                   #   envs: bandit / grid_world / cliff_walk / random_walk / cart_pole_lite / environment

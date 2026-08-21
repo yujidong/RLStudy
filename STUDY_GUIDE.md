@@ -18,7 +18,7 @@
 | 2 策略梯度 + PPO | Ch06 → 09 | 12-18 小时 |
 | 3 LLM RLHF + GRPO | Ch10 → 15 | 15-20 小时 |
 | 4 研究前沿 | Ch16 → 18 | 8-12 小时 |
-| 5 Agentic RL | Ch19 | 2-3 小时 |
+| 5 Agentic RL | Ch19 → 20 | 4-5 小时 |
 
 - **零基础**：按顺序走，别跳。
 - **有 RL 基础赶时间**：Fast-track `Ch00 → 01 → 05 → (05b) → 07 → 09 → 13`，约 20 小时直达 GRPO。
@@ -498,9 +498,9 @@ return-to-go R̂_t（从 t 到回合结束的实际累计奖励）：把 (R̂_t,
 
 ## Phase 5
 
-### Ch19 Agentic RL（工具调用 + 多轮交互）
+### Ch19 Agent 基础（让 LLM 学会使用工具）
 
-1. Agent loop 和 RL loop 的对应关系是什么？多轮 setting 下，state 里多了什么？
+1. Agent loop 和 RL loop 的对应关系是什么？工具增强解码和普通自回归解码的差别在哪一步发生？
 <details><summary>答案</summary>
 
 观察（用户消息/工具返回）= 状态，动作 = 生成的 token（或一次工具调用），环境 = 搜索/计算器/沙盒，奖励 = 任务结局。多轮下 state 包含**工具注入的观察**——上下文随交互增长，且环境注入的 token 属于观察（state），**不算进 log π**（不是模型的动作）——这是 Agentic GRPO 最容易踩的坑。
@@ -522,6 +522,32 @@ RAFT = 把 group advantage 二值化（正确 1 / 错误 0）后做 SFT——丢
 <details><summary>答案</summary>
 
 网络只需学会抄写操作数、转写工具结果——序列模型的本行；而裸算要把进位加法压进参数——容量的硬功夫。工具是**能力边界的扩展**而非接口：o3/R1 的搜索-推理-回溯是同一原理的工业版。多数投票治随机错不治系统错、oracle best-of-K 是 RL 的理论收益上限——这两个仪表盘读数是 agent 工程的常识。
+</details>
+
+### Ch20 Agentic GRPO 实战（多轮强化学习 + 全书终章）
+
+1. 多轮轨迹里 log π 怎么算？为什么环境注入的 token 不能计入？
+<details><summary>答案</summary>
+
+只对模型 emit 的 token 求和（rollout 时记 emitted 蒙版）。环境注入的 token 属于**观察**（state 的一部分）而非动作——把观察算进 π 的分子，策略梯度就错了（对不是自己做的选择求了梯度）。
+</details>
+
+2. 为什么 GRPO 在背熟的题集上没有梯度？
+<details><summary>答案</summary>
+
+组优势 Â=(r−r̄)/σ：背熟的题组内全对 → σ=0 → Â≡0 → 梯度为零。RL 的信号不在奖励本身，而在**组内的不一致**——「够得着但不稳」的任务才有学习信号（对应真实 RLHF 里按难度筛题、R1 的课程设计）。
+</details>
+
+3. 「无限题海」实验揭示了 on-policy RL 的什么本质？它和 SFT/RAFT 的数据观有何不同？
+<details><summary>答案</summary>
+
+SFT/RAFT 被固定数据集锁死；on-policy RL 的训练集可由任务分布**无限自生成**——模型始终在自己的能力边缘练习（自生成课程）。AlphaZero 自我对弈、R1 无限题海、Search-R1 真实搜索都是同一原理：把「训练数据」变成「训练环境」。
+</details>
+
+4. Agentic GRPO 相对 Ch13 单轮 GRPO 的三个结构变化是什么？
+<details><summary>答案</summary>
+
+① rollout 从一次采样变成模型段⇄环境段的交互循环；② 状态包含工具返回的观察（上下文增长）；③ log π 只对模型 emit 的 token 计算（观察不算）。目标函数（组优势/clip/KL）一字不改。
 </details>
 
 ---
